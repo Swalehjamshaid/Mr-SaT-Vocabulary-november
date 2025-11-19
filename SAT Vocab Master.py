@@ -27,8 +27,9 @@ if "GEMINI_API_KEY" not in os.environ and not ("__initial_auth_token__" in globa
     st.error("🔴 GEMINI_API_KEY is missing!")
     st.warning("""
     To fix this, you MUST set your Gemini API key securely.
-    If running on Streamlit Cloud, go to your app settings (Secrets) and add your key in TOML format:
-    GEMINI_API_KEY="YOUR_ACTUAL_KEY_STRING"
+    1. **If on Streamlit Cloud:** Go to your app settings (Secrets) and add the key in TOML format: 
+       `GEMINI_API_KEY="YOUR_ACTUAL_KEY_STRING"`
+    2. **If running locally:** Set the GEMINI_API_KEY environment variable in your terminal/OS.
     """)
     st.stop()
     
@@ -93,52 +94,56 @@ def save_vocabulary_to_file(data: List[Dict]):
 # 3. AI EXTRACTION & TTS FUNCTIONS
 # ----------------------------------------------------------------------
 
-def call_tts_api(text: str) -> Optional[str]:
+def call_tts_api(text: str, max_retries: int = 3) -> Optional[str]:
     """
-    Calls the Gemini TTS API to get base64 encoded PCM audio data.
-    Caches results to avoid repeated API calls.
+    Calls the Gemini TTS API to get base64 encoded PCM audio data with retries.
+    Caches results to avoid repeated API calls and implements exponential backoff.
     """
     if text in st.session_state.audio_data_cache:
         return st.session_state.audio_data_cache[text]
 
-    # Only show the info message when running locally, to prevent too much UI clutter on the cloud
+    # Only show the info message when running locally
     if 'streamlit run' in sys.argv[0]:
-        st.info(f"Generating pronunciation audio for: **{text}**")
+        st.info(f"Attempting to generate pronunciation audio for: **{text}**")
     
-    try:
-        # Use a cheerful voice for a positive learning experience (Zephyr)
-        payload = {
-            "contents": [{
-                "parts": [{ "text": f"Say cheerfully: {text}" }]
-            }],
-            "generationConfig": {
-                "responseModalities": ["AUDIO"],
-                "speechConfig": {
-                    "voiceConfig": {
-                        "prebuiltVoiceConfig": { "voiceName": "Zephyr" }
+    for attempt in range(max_retries):
+        try:
+            # Use a cheerful voice for a positive learning experience (Zephyr)
+            payload = {
+                "contents": [{
+                    "parts": [{ "text": f"Say clearly and slowly: {text}" }]
+                }],
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": { "voiceName": "Zephyr" }
+                        }
                     }
                 }
             }
-        }
-        
-        # NOTE: Using a separate client here for the TTS model 
-        tts_client = genai.Client()
-        response = tts_client.models.generate_content(
-            model="gemini-2.5-flash-preview-tts",
-            contents=payload["contents"],
-            config=payload["generationConfig"]
-        )
+            
+            # NOTE: Using a separate client here for the TTS model 
+            tts_client = genai.Client()
+            response = tts_client.models.generate_content(
+                model="gemini-2.5-flash-preview-tts",
+                contents=payload["contents"],
+                config=payload["generationConfig"]
+            )
 
-        part = response.candidates[0].content.parts[0]
-        audio_data = part.inlineData.data
-        
-        st.session_state.audio_data_cache[text] = audio_data
-        return audio_data
+            part = response.candidates[0].content.parts[0]
+            audio_data = part.inlineData.data
+            
+            st.session_state.audio_data_cache[text] = audio_data
+            return audio_data
 
-    except Exception as e:
-        # We don't show a huge error for every failed TTS call, just return None
-        # st.error(f"🔴 TTS API Failed for '{text}': {e}") 
-        return None
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt  # Exponential backoff (1s, 2s)
+                time.sleep(wait_time)
+            else:
+                # st.error(f"🔴 TTS API Failed permanently for '{text}' after {max_retries} attempts.")
+                return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
@@ -502,7 +507,34 @@ def admin_extraction_ui():
     
     The application uses the Gemini AI to generate new vocabulary and saves it to **`{JSON_FILE_PATH}`**.
     """)
+    
+    # --- Manual TTS Test Tool ---
+    st.subheader("🔊 Audio Pronunciation Test")
+    test_word = st.text_input("Enter word to test audio:", value="ephemeral")
+    
+    if st.button("Test Pronunciation"):
+        if test_word:
+            with st.spinner(f"Testing audio for '{test_word}'..."):
+                test_audio = call_tts_api(test_word, max_retries=3)
+            
+            if test_audio:
+                # Use the embedded JS player for playback
+                js_call = f'window.playAudio("{test_audio}");'
+                st.markdown(f"""
+                    <button 
+                        onclick='{js_call}' 
+                        style='background-color: #007BFF; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer;'>
+                        ▶️ Play "{test_word}"
+                    </button>
+                """, unsafe_allow_html=True)
+                st.success(f"Audio stream successfully generated for '{test_word}'. If you don't hear anything, check your browser permissions.")
+            else:
+                st.error(f"Failed to generate audio stream for '{test_word}'. The TTS server may be overloaded. Try again in a minute.")
+        else:
+            st.warning("Please enter a word to test.")
 
+    st.markdown("---")
+    
     # Admin Action: Manually trigger extraction
     if st.button("Manually Extract 5 New Words (Real AI Call)", type="secondary"):
         

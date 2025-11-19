@@ -23,8 +23,18 @@ except ImportError:
 
 # Check for API Key (Works for local environment variables and Streamlit Secrets)
 if "GEMINI_API_KEY" not in os.environ and not ("__initial_auth_token__" in globals() and __initial_auth_token__):
-    st.error("🔴 GEMINI_API_KEY environment variable is not set.")
-    st.warning("Please set your Gemini API key before running the application.")
+    st.error("🔴 GEMINI_API_KEY is missing!")
+    st.warning("""
+    To fix this, you MUST set your Gemini API key securely:
+    
+    1. **If running locally:** Set the `GEMINI_API_KEY` in your operating system's environment variables.
+    2. **If running on Streamlit Cloud (Like satvocabulary.streamlit.app):**
+       Go to your app's settings on the Streamlit dashboard and add the key to the secrets file (`secrets.toml`) in this format:
+       
+       ```toml
+       GEMINI_API_KEY="PASTE_YOUR_FULL_GEMINI_API_KEY_HERE"
+       ```
+    """)
     st.stop()
     
 # Initialize Gemini Client (reads key from environment variable automatically)

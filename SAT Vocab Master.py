@@ -6,6 +6,7 @@ import os
 from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
+from pydantic import json_schema 
 
 # --- AI & STRUCTURED OUTPUT LIBRARIES ---
 try:
@@ -20,7 +21,7 @@ except ImportError:
 # *** LOCAL EXECUTION SETUP & FILE PATHS ***
 # ======================================================================
 
-# Check for API Key
+# Check for API Key (Works for local environment variables and Streamlit Secrets)
 if "GEMINI_API_KEY" not in os.environ and not ("__initial_auth_token__" in globals() and __initial_auth_token__):
     st.error("🔴 GEMINI_API_KEY environment variable is not set.")
     st.warning("Please set your Gemini API key before running the application.")
@@ -118,7 +119,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     # 4. Configure structured output
     config = types.GenerateContentConfig(
         response_mime_type="application/json",
-        # 🟢 FIXED: Use the Pydantic model's built-in schema method
         response_json_schema=list_schema, 
     )
 

@@ -3,6 +3,7 @@ import time
 import random
 import sys
 import os
+import base64
 from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
@@ -25,15 +26,9 @@ except ImportError:
 if "GEMINI_API_KEY" not in os.environ and not ("__initial_auth_token__" in globals() and __initial_auth_token__):
     st.error("🔴 GEMINI_API_KEY is missing!")
     st.warning("""
-    To fix this, you MUST set your Gemini API key securely:
-    
-    1. **If running locally:** Set the `GEMINI_API_KEY` in your operating system's environment variables.
-    2. **If running on Streamlit Cloud (Like satvocabulary.streamlit.app):**
-       Go to your app's settings on the Streamlit dashboard and add the key to the secrets file (`secrets.toml`) in this format:
-       
-       ```toml
-       GEMINI_API_KEY="PASTE_YOUR_FULL_GEMINI_API_KEY_HERE"
-       ```
+    To fix this, you MUST set your Gemini API key securely.
+    If running on Streamlit Cloud, go to your app settings (Secrets) and add your key in TOML format:
+    GEMINI_API_KEY="YOUR_ACTUAL_KEY_STRING"
     """)
     st.stop()
     
@@ -71,6 +66,7 @@ if 'is_auth' not in st.session_state: st.session_state.is_auth = False
 if 'vocab_data' not in st.session_state: st.session_state.vocab_data = []
 if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
+if 'audio_data_cache' not in st.session_state: st.session_state.audio_data_cache = {} # Cache for base64 audio data
 
 
 def load_vocabulary_from_file():
@@ -94,8 +90,55 @@ def save_vocabulary_to_file(data: List[Dict]):
         st.error(f"Error saving data to {JSON_FILE_PATH}: {e}")
 
 # ----------------------------------------------------------------------
-# 3. REAL AI EXTRACTION & LOADING (Gemini API)
+# 3. AI EXTRACTION & TTS FUNCTIONS
 # ----------------------------------------------------------------------
+
+def call_tts_api(text: str) -> Optional[str]:
+    """
+    Calls the Gemini TTS API to get base64 encoded PCM audio data.
+    Caches results to avoid repeated API calls.
+    """
+    if text in st.session_state.audio_data_cache:
+        return st.session_state.audio_data_cache[text]
+
+    # Only show the info message when running locally, to prevent too much UI clutter on the cloud
+    if 'streamlit run' in sys.argv[0]:
+        st.info(f"Generating pronunciation audio for: **{text}**")
+    
+    try:
+        # Use a cheerful voice for a positive learning experience (Zephyr)
+        payload = {
+            "contents": [{
+                "parts": [{ "text": f"Say cheerfully: {text}" }]
+            }],
+            "generationConfig": {
+                "responseModalities": ["AUDIO"],
+                "speechConfig": {
+                    "voiceConfig": {
+                        "prebuiltVoiceConfig": { "voiceName": "Zephyr" }
+                    }
+                }
+            }
+        }
+        
+        # NOTE: Using a separate client here for the TTS model 
+        tts_client = genai.Client()
+        response = tts_client.models.generate_content(
+            model="gemini-2.5-flash-preview-tts",
+            contents=payload["contents"],
+            config=payload["generationConfig"]
+        )
+
+        part = response.candidates[0].content.parts[0]
+        audio_data = part.inlineData.data
+        
+        st.session_state.audio_data_cache[text] = audio_data
+        return audio_data
+
+    except Exception as e:
+        # We don't show a huge error for every failed TTS call, just return None
+        # st.error(f"🔴 TTS API Failed for '{text}': {e}") 
+        return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
@@ -120,7 +163,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     """
 
     # 3. Define the JSON schema for a LIST of SatWord objects
-    # This is the guaranteed Pydantic V2 way to get the JSON schema for a list response.
     list_schema = {
         "type": "array",
         "items": SatWord.model_json_schema() # Get the schema for a single item
@@ -147,11 +189,9 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
             validated_words = []
             for item in new_data_list:
                 try:
-                    # Validate against the Pydantic model
                     word_obj = SatWord(**item)
                     validated_words.append(word_obj.model_dump())
                 except ValidationError as e:
-                    # This handles network errors, API key errors, or structured output failures
                     st.warning(f"AI generated invalid data for a word (validation error: {e}). Skipping item.")
                     continue
             
@@ -164,9 +204,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
 def load_or_extract_initial_vocabulary(required_count: int = LOAD_BATCH_SIZE):
     """
     Loads existing data, extracts new words via AI if needed, and saves the updated list.
-    
-    Note: This is designed to only check if the *initial* words are present,
-          the "Load More" button handles subsequent extraction.
     """
     # 1. Load existing data
     st.session_state.vocab_data = load_vocabulary_from_file()
@@ -245,6 +282,83 @@ def load_more_words():
 # 4. MAIN FEATURES: UI COMPONENTS
 # ----------------------------------------------------------------------
 
+# --- JAVASCRIPT FOR PCM TO WAV CONVERSION (Required for TTS) ---
+JS_PCM_TO_WAV = """
+<script>
+    function base64ToArrayBuffer(base64) {
+        var binaryString = atob(base64);
+        var len = binaryString.length;
+        var bytes = new Int8Array(len);
+        for (var i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    function pcmToWav(pcm16, sampleRate) {
+        var buffer = new ArrayBuffer(44 + pcm16.length * 2);
+        var view = new DataView(buffer);
+        var pcmLength = pcm16.length * 2;
+        var channels = 1;
+        var bitsPerSample = 16;
+        var byteRate = sampleRate * channels * (bitsPerSample / 8);
+
+        // RIFF chunk descriptor
+        writeString(view, 0, 'RIFF');
+        view.setUint32(4, 36 + pcmLength, true);
+        writeString(view, 8, 'WAVE');
+
+        // FMT chunk
+        writeString(view, 12, 'fmt ');
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true); // Linear PCM
+        view.setUint16(22, channels, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, channels * (bitsPerSample / 8), true);
+        view.setUint16(34, bitsPerSample, true);
+
+        // Data chunk
+        writeString(view, 36, 'data');
+        view.setUint32(40, pcmLength, true);
+
+        // Write PCM data
+        var offset = 44;
+        for (var i = 0; i < pcm16.length; i++, offset += 2) {
+            view.setInt16(offset, pcm16[i], true);
+        }
+
+        return new Blob([view], { type: 'audio/wav' });
+    }
+
+    function writeString(view, offset, string) {
+        for (var i = 0; i < string.length; i++) {
+            view.setUint8(offset + i, string.charCodeAt(i));
+        }
+    }
+    
+    // --- MAIN PLAY FUNCTION ---
+    window.playAudio = function(base64Data, sampleRate = 24000) {
+        try {
+            var pcmData = base64ToArrayBuffer(base64Data);
+            // The API returns 16-bit signed PCM, which we need to convert to an Int16Array
+            var pcm16 = new Int16Array(pcmData.slice(0)); 
+            var wavBlob = pcmToWav(pcm16, sampleRate);
+            
+            var audioUrl = URL.createObjectURL(wavBlob);
+            var audio = new Audio(audioUrl);
+            audio.play();
+
+        } catch(e) {
+            console.error("Error playing audio:", e);
+            alert("Could not play audio. Check console for details.");
+        }
+    }
+</script>
+"""
+st.components.v1.html(JS_PCM_TO_WAV, height=0)
+
+
 def display_vocabulary_ui():
     """Renders the Vocabulary Display feature with Load More functionality."""
     st.header("📚 Vocabulary Display", divider="blue")
@@ -267,7 +381,25 @@ def display_vocabulary_ui():
             tip = data.get('tip', 'N/A')
             usage = data.get('usage', 'N/A')
             
+            
             with st.expander(f"**{word}** - {pronunciation}"):
+                
+                # --- TTS PLAY BUTTON ---
+                audio_base64 = call_tts_api(word)
+                if audio_base64:
+                    # Create the JavaScript call string
+                    js_call = f'window.playAudio("{audio_base64}");'
+                    
+                    # Embed the button and call the JS function on click
+                    st.markdown(f"""
+                        <button 
+                            onclick='{js_call}' 
+                            style='background-color: #4CAF50; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 10px;'>
+                            🔊 Listen
+                        </button>
+                    """, unsafe_allow_html=True)
+                # -----------------------
+
                 st.markdown(f"**Definition:** {definition.capitalize()}")
                 st.markdown(f"**Memory Tip:** *{tip}*")
                 st.markdown(f"**Usage:** *'{usage}'*")

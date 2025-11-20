@@ -710,3 +710,77 @@ def admin_extraction_ui():
             st.session_state.vocab_data.extend(new_batch)
             save_vocabulary_to_file(st.session_state.vocab_data)
             st.success(f"✅ Added {len(new_batch)} words to the database.")
+            st.rerun()
+        else:
+            st.error("Failed to generate new words. Check API key and logs.")
+
+# ----------------------------------------------------------------------
+# 5. STREAMLIT APPLICATION STRUCTURE
+# ----------------------------------------------------------------------
+
+def main():
+    """The main Streamlit application function."""
+    st.set_page_config(page_title="AI Vocabulary Builder", layout="wide")
+    st.title("🧠 AI-Powered Vocabulary Builder")
+    
+    # --- Sidebar for Auth Status ---
+    with st.sidebar:
+        st.header("User Login")
+        
+        if not st.session_state.is_auth:
+            
+            st.markdown("##### New User Registration / Existing User Login")
+            
+            user_email = st.text_input("📧 Email", key="user_email_input", value=st.session_state.current_user_email or "")
+            password = st.text_input("🔑 Password", type="password", key="password_input")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("Login", key="login_btn", type="primary"):
+                    handle_auth("login", user_email, password)
+            with col2:
+                if st.button("Register", key="register_btn"):
+                    handle_auth("register", user_email, password)
+            
+            st.markdown("---")
+            st.markdown(f"""
+            **Admin Login:** `{ADMIN_EMAIL}` / `Jamshaid,1981`
+            
+            **Note:** Use any email/6+ char password to simulate general user access.
+            """)
+            
+        else:
+            display_name = "Admin" if st.session_state.is_admin else st.session_state.current_user_email
+            st.success(f"Logged in as: **{display_name}**")
+            
+            if st.button("Log Out", on_click=handle_logout):
+                pass
+                
+    # --- Main Content ---
+    
+    if not st.session_state.is_auth:
+        st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
+    else:
+        # Load data on successful login 
+        if not st.session_state.vocab_data:
+            load_and_update_vocabulary_data() 
+
+        # Auto-extraction logic (non-blocking status message)
+        if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
+             st.info("The vocabulary list is currently building to the target size...")
+
+        # Use tabs for the main features
+        tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])
+        
+        with tab_display:
+            display_vocabulary_ui()
+            
+        with tab_quiz:
+            generate_quiz_ui()
+
+        with tab_admin:
+            admin_extraction_ui()
+
+if __name__ == "__main__":
+    main()

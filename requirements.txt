@@ -1,11 +1,4 @@
 streamlit
-firebase-admin
-google-cloud-firestore
-requests
-python-dotenv
-# Optional, commonly used packages, uncomment if you use them:
-# pyrebase4
-# pandas
-# numpy
-# pillow
-# matplotlib
+pydantic
+google-genai
+firebase

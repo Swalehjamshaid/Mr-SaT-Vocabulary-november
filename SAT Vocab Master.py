@@ -135,31 +135,28 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     list_schema = {"type": "array", "items": SatWord.model_json_schema()}
     config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
 
-    # Use a placeholder container to display progress without blocking the whole app
-    progress_container = st.empty() 
+    # 🔴 FIX: Removed the st.empty() and the blocking spinner wrapper 
+    # to prevent the StreamlitAPIException crash. The extraction is still blocking, 
+    # but the UI won't try to update itself during the blocked time.
     
-    with progress_container.spinner(f"🤖 Calling Gemini AI for text generation of {num_words} words..."):
-        try:
-            response = gemini_client.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt, config=config
-            )
-            new_data_list = json.loads(response.text)
-            validated_words = [SatWord(**item).model_dump() for item in new_data_list if 'word' in item]
-            if not validated_words:
-                progress_container.error("AI returned structured data but validation failed for all items.")
-                return []
-        except Exception as e:
-            progress_container.error(f"🔴 Gemini Text Extraction Failed: {e}")
+    try:
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt, config=config
+        )
+        new_data_list = json.loads(response.text)
+        validated_words = [SatWord(**item).model_dump() for item in new_data_list if 'word' in item]
+        if not validated_words:
+            st.error("AI returned structured data but validation failed for all items.")
             return []
-            
-    # Clear the spinner on success
-    progress_container.empty()
-
-
+    except Exception as e:
+        st.error(f"🔴 Gemini Text Extraction Failed: {e}")
+        return []
+        
     # --- Step 2: Generate and Attach Audio URL ---
     
     words_with_audio = []
     
+    # We can keep this spinner, as it is short-lived and outside the main AI call
     with st.spinner(f"🔗 Constructing audio links for {len(validated_words)} words..."):
         
         for word_data in validated_words:
@@ -186,8 +183,6 @@ def load_and_update_vocabulary_data():
     # 🔴 Fix for old data: If old words don't have the audio_url field, generate it now.
     words_missing_url = [d for d in st.session_state.vocab_data if d.get('audio_url') is None]
     if words_missing_url:
-        # st.info(f"Updating {len(words_missing_url)} existing words with reliable audio links.")
-        
         # Use a temporary spinner to avoid blocking the whole app
         with st.spinner("Updating audio links..."): 
             for word_data in words_missing_url:
@@ -195,7 +190,6 @@ def load_and_update_vocabulary_data():
             
         # Save the updated list (with newly generated audio URL)
         save_vocabulary_to_file(st.session_state.vocab_data)
-        # st.success(f"Successfully updated {len(words_missing_url)} words with audio links.")
 
     if word_count > 0:
         st.info(f"✅ Loaded {word_count} words from local file.")
@@ -231,9 +225,9 @@ def check_and_start_auto_extraction():
         
         if words_to_extract > 0:
             st.session_state.is_extracting = True
-            st.warning(f"Auto-extracting {words_to_extract} new words in the background...")
+            st.info(f"Auto-extracting {words_to_extract} new words in the background...")
             
-            # --- Perform the slow operation ---
+            # --- Perform the slow operation (Blocking, but without conflicting UI elements) ---
             existing_words = [d['word'] for d in st.session_state.vocab_data]
             new_words = real_llm_vocabulary_extraction(words_to_extract, existing_words)
             # --- End slow operation ---

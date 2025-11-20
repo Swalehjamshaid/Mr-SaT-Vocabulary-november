@@ -8,12 +8,11 @@ from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
-# --- New Imports for gTTS and Audio Processing ---
+# --- Imports for gTTS and Audio Processing ---
 try:
     from gtts import gTTS
     import io
 except ImportError:
-    # This block ensures the app stops if gtts is missing, preventing later errors.
     st.error("ERROR: The 'gtts' library is required.")
     st.error("Please ensure it is in requirements.txt and installed.")
     st.stop()
@@ -125,8 +124,8 @@ def generate_gtts_audio(text: str) -> Optional[str]:
         return base64_audio
 
     except Exception as e:
-        # Logging the error locally for debugging, but failing silently in the app UI
-        # st.error(f"gTTS Audio Generation Failed for '{text}': {e}")
+        # If gTTS fails here, it's likely a network block in the Streamlit cloud environment.
+        # We fail silently and log the issue internally.
         return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
@@ -308,6 +307,7 @@ def display_vocabulary_ui():
                     """
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
+                    # This is the message you see if gTTS fails during extraction!
                     st.warning("Audio not available for this word.")
                 # -----------------------
 

@@ -48,8 +48,11 @@ AUTO_EXTRACT_TARGET_SIZE = 200
 QUIZ_SIZE = 5 
 
 # Admin Configuration (Mock Login)
-ADMIN_EMAIL = "rot.jamshaid@gmail.com"
+ADMIN_EMAIL = "roy.jamshaid@gmail.com" # 🟢 FIX: Corrected email to 'roy.jamshaid@gmail.com'
 ADMIN_PASSWORD = "Jamshaid,1981" 
+
+# 🟢 CHANGE: Increased extraction batch size to 50
+MANUAL_EXTRACT_BATCH = 50 
 
 
 # Pydantic Schema for Vocabulary Word
@@ -460,11 +463,11 @@ def admin_extraction_ui():
     st.subheader("Vocabulary Extraction")
     st.markdown(f"**Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).")
 
-    if st.button("Force Extract 5 New Words", type="secondary"):
-        st.info("Manually extracting 5 new words...")
+    if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): # 🟢 CHANGE: Use new constant
+        st.info(f"Manually extracting {MANUAL_EXTRACT_BATCH} new words...")
         
         existing_words = [d['word'] for d in st.session_state.vocab_data]
-        new_batch = real_llm_vocabulary_extraction(5, existing_words)
+        new_batch = real_llm_vocabulary_extraction(MANUAL_EXTRACT_BATCH, existing_words) # 🟢 CHANGE: Use new constant
         
         if new_batch:
             st.session_state.vocab_data.extend(new_batch)

@@ -4,18 +4,12 @@ import random
 import sys
 import os
 import base64
+import urllib.parse 
 from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
-# --- Imports for gTTS and Audio Processing ---
-try:
-    from gtts import gTTS
-    import io
-except ImportError:
-    st.error("ERROR: The 'gtts' library is required.")
-    st.error("Please ensure it is in requirements.txt and installed.")
-    st.stop()
+# --- Removed gTTS/io imports since we will use direct URL ---
 # ----------------------------------------------------
 
 # --- AI & STRUCTURED OUTPUT LIBRARIES ---
@@ -56,18 +50,17 @@ JSON_FILE_PATH = "vocab_data.json"
 REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
 
-# Pydantic Schema for Structured AI Output - UPDATED to store audio base64
+# Pydantic Schema for Structured AI Output - UPDATED to store audio URL
 class SatWord(BaseModel):
     """Defines the exact structure for the AI-generated vocabulary word."""
     word: str = Field(description="The SAT-level word.")
-    # Asking for a more TTS-friendly pronunciation format
     pronunciation: str = Field(description="Simple, hyphenated phonetic pronunciation (e.g., eh-FEM-er-al).")
     definition: str = Field(description="The concise dictionary definition.")
     tip: str = Field(description="A short, catchy mnemonic memory tip.")
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
-    # 🟢 NEW FIELD: To store the audio base64 string permanently
-    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded MP3 audio data for pronunciation.")
+    # 🟢 FINAL AUDIO FIELD: Store the public URL instead of base64
+    audio_url: Optional[str] = Field(default=None, description="Public URL for MP3 audio pronunciation.")
 
 # ----------------------------------------------------------------------
 # 2. DATA PERSISTENCE & STATE MANAGEMENT
@@ -101,37 +94,23 @@ def save_vocabulary_to_file(data: List[Dict]):
         st.error(f"Error saving data to {JSON_FILE_PATH}: {e}")
 
 # ----------------------------------------------------------------------
-# 3. AI EXTRACTION & gTTS FUNCTIONS
+# 3. AI EXTRACTION & AUDIO FUNCTIONS
 # ----------------------------------------------------------------------
 
-def generate_gtts_audio(text: str) -> Optional[str]:
+def construct_tts_url(text: str) -> str:
     """
-    Generates audio using gTTS, converts it to base64, and returns the string.
-    This relies only on gTTS and standard Python IO, making it Streamlit Cloud friendly.
+    Constructs a reliable TTS URL using Google's public endpoint.
+    This avoids the server-side network block.
     """
-    try:
-        # 1. Create gTTS object and save to an in-memory byte buffer
-        tts = gTTS(text=text, lang='en')
-        mp3_fp = io.BytesIO()
-        tts.write_to_fp(mp3_fp)
-        mp3_fp.seek(0)
-        
-        # 2. Read the MP3 audio bytes
-        audio_bytes = mp3_fp.read()
-        
-        # 3. Encode to base64
-        base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
-        return base64_audio
+    # URL is generated based on the text, permanently storing the link.
+    encoded_text = urllib.parse.quote(text)
+    return f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl=en&client=tw-ob"
 
-    except Exception as e:
-        # If gTTS fails here, it's likely a network block in the Streamlit cloud environment.
-        # We fail silently and log the issue internally.
-        return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
     1. Calls the Gemini API to generate structured vocabulary data.
-    2. Calls the gTTS library for each new word and stores the audio data.
+    2. Constructs the audio URL for each new word and stores it.
     """
     
     # --- Step 1: Generate Text Data (Remains the same using Gemini) ---
@@ -152,7 +131,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
 
     with st.spinner(f"🤖 Calling Gemini AI for text generation of {num_words} words..."):
-        # ... (Text extraction logic remains the same)
         try:
             response = gemini_client.models.generate_content(
                 model="gemini-2.5-flash", contents=prompt, config=config
@@ -167,38 +145,47 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
             return []
 
 
-    # --- Step 2: Generate and Attach Audio Data using gTTS ---
+    # --- Step 2: Generate and Attach Audio URL ---
     
     words_with_audio = []
     
-    with st.spinner(f"🔊 Generating gTTS audio for {len(validated_words)} words..."):
-        tts_progress = st.progress(0, text="Generating Audio...")
+    with st.spinner(f"🔗 Constructing audio links for {len(validated_words)} words..."):
         
-        for i, word_data in enumerate(validated_words):
+        for word_data in validated_words:
             word = word_data['word']
             
-            # 🟢 NEW: Use the local Python library for audio generation
-            audio_base64 = generate_gtts_audio(word)
+            # 🟢 FINAL FIX: Store the direct audio URL instead of relying on server-side generation
+            audio_url = construct_tts_url(word)
             
-            # Attach the base64 string directly to the word's data structure
-            word_data['audio_base64'] = audio_base64
+            # Attach the URL directly to the word's data structure
+            word_data['audio_url'] = audio_url
             words_with_audio.append(word_data)
-
-            # Update progress bar
-            tts_progress.progress((i + 1) / len(validated_words), text=f"Generated audio for {word}...")
-            
-        tts_progress.empty() # Clear progress bar once finished
 
     return words_with_audio
 
 def load_or_extract_initial_vocabulary(required_count: int = LOAD_BATCH_SIZE):
     """
     Loads existing data, extracts new words via AI if needed, and saves the updated list.
+    Also ensures old words are updated with the new audio URL scheme.
     """
     # 1. Load existing data
     st.session_state.vocab_data = load_vocabulary_from_file()
     word_count = len(st.session_state.vocab_data)
     
+    # 🔴 Fix for old data: If old words don't have the audio_url field, generate it now.
+    words_missing_url = [d for d in st.session_state.vocab_data if d.get('audio_url') is None]
+    if words_missing_url:
+        st.info(f"Updating {len(words_missing_url)} existing words with reliable audio links.")
+        
+        with st.spinner("Updating audio links..."):
+            for word_data in words_missing_url:
+                word_data['audio_url'] = construct_tts_url(word_data['word'])
+            
+        # Save the updated list (with newly generated audio URL)
+        save_vocabulary_to_file(st.session_state.vocab_data)
+        st.success(f"Successfully updated {len(words_missing_url)} words with audio links.")
+
+
     if st.session_state.vocab_data:
         st.info(f"✅ Loaded {word_count} words from local file.")
 
@@ -290,25 +277,23 @@ def display_vocabulary_ui():
             definition = data.get('definition', 'N/A')
             tip = data.get('tip', 'N/A')
             usage = data.get('usage', 'N/A')
-            audio_base64 = data.get('audio_base64') # 🟢 READ AUDIO DIRECTLY FROM DATABASE
+            audio_url = data.get('audio_url') # 🟢 READ AUDIO URL DIRECTLY FROM DATABASE
             
             
             with st.expander(f"**{word}** - {pronunciation}"):
                 
                 # --- AUDIO PLAYBACK ---
-                if audio_base64:
-                    # Streamlit can play base64-encoded audio directly using HTML audio tag
-                    # We specify the MIME type as MP3 since gTTS generates MP3
+                if audio_url:
+                    # Streamlit can play public audio URLs directly
                     audio_html = f"""
-                        <audio controls style="width: 100%;">
-                            <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+                        <audio controls style="width: 100%;" src="{audio_url}">
                             Your browser does not support the audio element.
                         </audio>
                     """
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
-                    # This is the message you see if gTTS fails during extraction!
-                    st.warning("Audio not available for this word.")
+                    # This message should only appear for old words that failed the URL update
+                    st.warning("Audio URL is missing for this word.")
                 # -----------------------
 
                 st.markdown(f"**Definition:** {definition.capitalize()}")
@@ -411,30 +396,28 @@ def admin_extraction_ui():
     st.markdown(f"""
     **Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).
     
-    The application uses the Gemini AI (for text) and **gTTS (for audio)** to generate and save data to **`{JSON_FILE_PATH}`**.
+    The application uses the Gemini AI (for text) and public web audio links for pronunciation.
     """)
     
     # --- Manual TTS Test Tool ---
     st.subheader("🔊 Audio Pronunciation Test")
-    st.markdown("This uses the robust **gTTS** system. Test here to confirm audio libraries are working.")
+    st.markdown("This uses a direct, public audio URL for maximum compatibility.")
     test_word = st.text_input("Enter word to test audio:", value="ephemeral")
     
     if st.button("Test Pronunciation"):
         if test_word:
-            with st.spinner(f"Testing audio for '{test_word}'..."):
-                test_audio = generate_gtts_audio(test_word)
+            test_url = construct_tts_url(test_word)
             
-            if test_audio:
+            if test_url:
                 audio_html = f"""
-                    <audio controls autoplay style="width: 100%;">
-                        <source src="data:audio/mp3;base64,{test_audio}" type="audio/mp3">
+                    <audio controls autoplay style="width: 100%;" src="{test_url}">
                         Your browser does not support the audio element.
                     </audio>
                 """
                 st.markdown(audio_html, unsafe_allow_html=True)
                 st.success(f"Audio stream successfully generated for '{test_word}'.")
             else:
-                st.error(f"Failed to generate audio stream for '{test_word}'. Check the terminal for gTTS errors.")
+                st.error(f"Failed to generate audio URL for '{test_word}'.")
         else:
             st.warning("Please enter a word to test.")
 

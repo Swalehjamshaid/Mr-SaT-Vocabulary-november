@@ -74,6 +74,9 @@ if 'is_auth' not in st.session_state: st.session_state.is_auth = False
 if 'vocab_data' not in st.session_state: st.session_state.vocab_data = []
 if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
+if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
+# 🟢 CHANGE: Flag to ensure auto-extraction only runs once per cycle
+if 'is_extracting' not in st.session_state: st.session_state.is_extracting = False 
 
 def load_vocabulary_from_file():
     """Loads vocabulary data from the local JSON file."""
@@ -132,7 +135,10 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     list_schema = {"type": "array", "items": SatWord.model_json_schema()}
     config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
 
-    with st.spinner(f"🤖 Calling Gemini AI for text generation of {num_words} words..."):
+    # Use a placeholder container to display progress without blocking the whole app
+    progress_container = st.empty() 
+    
+    with progress_container.spinner(f"🤖 Calling Gemini AI for text generation of {num_words} words..."):
         try:
             response = gemini_client.models.generate_content(
                 model="gemini-2.5-flash", contents=prompt, config=config
@@ -140,11 +146,14 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
             new_data_list = json.loads(response.text)
             validated_words = [SatWord(**item).model_dump() for item in new_data_list if 'word' in item]
             if not validated_words:
-                st.error("AI returned structured data but validation failed for all items.")
+                progress_container.error("AI returned structured data but validation failed for all items.")
                 return []
         except Exception as e:
-            st.error(f"🔴 Gemini Text Extraction Failed: {e}")
+            progress_container.error(f"🔴 Gemini Text Extraction Failed: {e}")
             return []
+            
+    # Clear the spinner on success
+    progress_container.empty()
 
 
     # --- Step 2: Generate and Attach Audio URL ---
@@ -165,10 +174,10 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
 
     return words_with_audio
 
-def load_or_extract_initial_vocabulary(required_count: int = LOAD_BATCH_SIZE):
+def load_and_update_vocabulary_data():
     """
-    Loads existing data, extracts new words via AI if needed, and saves the updated list.
-    Also ensures old words are updated with the new audio URL scheme.
+    Loads existing data (FAST) and ensures old words have the required audio URL (FAST).
+    This function must be kept non-blocking for quick app startup.
     """
     # 1. Load existing data
     st.session_state.vocab_data = load_vocabulary_from_file()
@@ -177,47 +186,70 @@ def load_or_extract_initial_vocabulary(required_count: int = LOAD_BATCH_SIZE):
     # 🔴 Fix for old data: If old words don't have the audio_url field, generate it now.
     words_missing_url = [d for d in st.session_state.vocab_data if d.get('audio_url') is None]
     if words_missing_url:
-        st.info(f"Updating {len(words_missing_url)} existing words with reliable audio links.")
+        # st.info(f"Updating {len(words_missing_url)} existing words with reliable audio links.")
         
-        with st.spinner("Updating audio links..."):
+        # Use a temporary spinner to avoid blocking the whole app
+        with st.spinner("Updating audio links..."): 
             for word_data in words_missing_url:
                 word_data['audio_url'] = construct_tts_url(word_data['word'])
             
         # Save the updated list (with newly generated audio URL)
         save_vocabulary_to_file(st.session_state.vocab_data)
-        st.success(f"Successfully updated {len(words_missing_url)} words with audio links.")
+        # st.success(f"Successfully updated {len(words_missing_url)} words with audio links.")
 
-
-    if st.session_state.vocab_data:
+    if word_count > 0:
         st.info(f"✅ Loaded {word_count} words from local file.")
+    
+    # Check if the initial required count (10 words for display) is met
+    if word_count < LOAD_BATCH_SIZE:
+        st.warning(f"Need {LOAD_BATCH_SIZE - word_count} more words for initial display. Triggering extraction now...")
+        
+        # We MUST block and run the AI now if the count is zero, otherwise the app is empty.
+        new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE - word_count, [])
+        if new_words:
+            st.session_state.vocab_data.extend(new_words)
+            save_vocabulary_to_file(st.session_state.vocab_data)
+            st.success(f"✅ Initial {len(new_words)} words generated.")
+            st.rerun() # Rerun to properly display new words
 
-    # 🟢 CHANGE: Automatic extraction logic on startup if word count is below target
+
+# 🟢 CHANGE: New function to manage the background/auto-extraction
+def check_and_start_auto_extraction():
+    """
+    Checks the database size against the target and triggers non-blocking extraction if needed.
+    """
+    word_count = len(st.session_state.vocab_data)
+    
+    if st.session_state.is_extracting:
+        # Already extracting, don't re-enter
+        return
+
     if word_count < AUTO_EXTRACT_TARGET_SIZE:
         
         # Calculate how many words we need, capped at our small batch size
         words_to_extract = min(AUTO_EXTRACT_TARGET_SIZE - word_count, AUTO_EXTRACT_BATCH)
         
         if words_to_extract > 0:
-            st.info(f"Auto-extracting {words_to_extract} new words in the background...")
+            st.session_state.is_extracting = True
+            st.warning(f"Auto-extracting {words_to_extract} new words in the background...")
             
+            # --- Perform the slow operation ---
             existing_words = [d['word'] for d in st.session_state.vocab_data]
-            
-            # 3. Call the real AI function
             new_words = real_llm_vocabulary_extraction(words_to_extract, existing_words)
+            # --- End slow operation ---
+
+            st.session_state.is_extracting = False
             
             if new_words:
-                # 4. Add new words to the list and save
                 st.session_state.vocab_data.extend(new_words)
                 save_vocabulary_to_file(st.session_state.vocab_data)
-                st.success(f"✅ Auto-extracted {len(new_words)} words. Total words available: {len(st.session_state.vocab_data)}")
+                st.success(f"✅ Background extracted {len(new_words)} words. Total: {len(st.session_state.vocab_data)}")
+                st.rerun()
             else:
                 st.error("Could not automatically generate new words.")
-    
-    # 2. Check if the initial required count (10 words for display) is met
-    if word_count < required_count:
-        st.info("Initial words for display are loaded.")
     else:
-        st.info(f"✅ Ready to start. Database size: {len(st.session_state.vocab_data)}")
+        st.info(f"Database is healthy. Target size ({AUTO_EXTRACT_TARGET_SIZE}) met.")
+
 
 # --- Login Handler (Defined before main() to prevent NameError) ---
 def handle_login(user_id, password):
@@ -227,9 +259,10 @@ def handle_login(user_id, password):
         st.session_state.current_user_id = user_id
         st.session_state.is_auth = True
         st.session_state.words_displayed = LOAD_BATCH_SIZE # Reset display count on login
+        st.session_state.quiz_start_index = 0 # 🟢 Reset quiz index on login
         st.success(f"Logged in as: {user_id}! Access granted.")
-        # Trigger the initial load/extraction after login
-        load_or_extract_initial_vocabulary(required_count=LOAD_BATCH_SIZE)
+        # 🟢 CHANGE: Trigger the fast load on login, ensuring data is available quickly
+        load_and_update_vocabulary_data() 
     else:
         st.error("Please enter a valid Email and Password.")
 
@@ -325,25 +358,27 @@ def display_vocabulary_ui():
 
 def start_new_quiz():
     """
-    Initializes the quiz based only on the currently displayed words in the Vocabulary List.
+    Initializes the quiz based only on the currently displayed words in sequential order.
     """
-    words_to_draw = st.session_state.words_displayed
-    
-    # 🟢 FIX: Limit the pool of words to the words currently visible in the Vocabulary List
-    words_pool = st.session_state.vocab_data[:words_to_draw]
-    
-    # 🟢 QUIZ CHANGE: Set QUIZ_SIZE to 5 questions
     QUIZ_SIZE = 5 
     
-    if len(words_pool) < 4:
-        st.error("Not enough words available in the current display pool for a meaningful quiz. Please load more words.")
+    # 🟢 FIX: Use the stored quiz_start_index to define the slice of words
+    start = st.session_state.quiz_start_index
+    end = start + QUIZ_SIZE
+    
+    # 🟢 FIX: Limit the pool of words to the sequence of words to be tested
+    words_pool = st.session_state.vocab_data[start:end]
+    
+    if len(words_pool) < QUIZ_SIZE:
+        st.error(f"Cannot start quiz. Need {QUIZ_SIZE} words starting from position {start + 1}, but only found {len(words_pool)}.")
         return
 
-    # Select 5 random words from the *displayed* pool for the quiz
-    quiz_words = random.sample(words_pool, min(QUIZ_SIZE, len(words_pool)))
+    # No need to randomly sample since we are taking the first 5 in the block
+    quiz_words = words_pool 
     
     # Store quiz details for accurate scoring later
     quiz_details = []
+    # Use the entire vocabulary list for decoy definitions
     all_definitions = [d['definition'].capitalize() for d in st.session_state.vocab_data]
     
     for question_data in quiz_words:
@@ -358,7 +393,7 @@ def start_new_quiz():
         random.shuffle(options)
         
         # 🟢 Capture the original index (position + 1) for the quiz display
-        # Find the index of the selected word in the *full* vocabulary list
+        # The index is simply the start index + the current position in the quiz block
         original_word_index = st.session_state.vocab_data.index(question_data) + 1
         
         quiz_details.append({
@@ -374,20 +409,44 @@ def start_new_quiz():
     st.session_state.quiz_active = True
     st.session_state.quiz_results = None # Store results after submission
 
+# Helper function to advance the quiz index
+def advance_quiz_index():
+    QUIZ_SIZE = 5
+    st.session_state.quiz_start_index += QUIZ_SIZE
+    st.session_state.quiz_active = False # Will reset UI and show new button
+
 # 🟢 QUIZ CHANGE: Function now processes all questions at once
 def generate_quiz_ui():
     """Renders the Quiz Section feature."""
     st.header("📝 Vocabulary Quiz", divider="green")
     
-    # QUIZ SIZE is 5 questions now
     QUIZ_SIZE = 5
+    total_words = len(st.session_state.vocab_data)
     
-    if not st.session_state.vocab_data or len(st.session_state.vocab_data) < 4:
-        st.info("A minimum of 4 words is required to start a quiz.")
+    if total_words < QUIZ_SIZE:
+        st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}")
         return
 
+    # Calculate current quiz block range
+    start_word_num = st.session_state.quiz_start_index + 1
+    end_word_num = min(st.session_state.quiz_start_index + QUIZ_SIZE, total_words)
+    
+    
     if not st.session_state.quiz_active:
-        st.button(f"Start New {QUIZ_SIZE}-Question Quiz (Using Displayed Words)", on_click=start_new_quiz, type="primary")
+        
+        if start_word_num > total_words:
+            st.info("You have completed all available quiz blocks!")
+            st.session_state.quiz_start_index = 0 # Reset for user to start over
+            start_word_num = 1
+            end_word_num = min(QUIZ_SIZE, total_words)
+            
+        st.markdown(f"**Current Quiz Block:** Words {start_word_num} through {end_word_num}.")
+        
+        st.button(
+            f"Start Quiz on Words #{start_word_num} - #{end_word_num}", 
+            on_click=start_new_quiz, 
+            type="primary"
+        )
         return
     
     # --- Results Display ---
@@ -416,9 +475,17 @@ def generate_quiz_ui():
             
             st.markdown("---")
             
-        st.session_state.quiz_active = False # Reset quiz state
         st.session_state.quiz_results = None # Clear results
-        st.button(f"Start Another {QUIZ_SIZE}-Question Quiz", on_click=start_new_quiz)
+        
+        # Button to move to the next sequential block
+        next_start_index = st.session_state.quiz_start_index + QUIZ_SIZE
+        if next_start_index < total_words:
+            st.button(f"Start Next Quiz Block (Words #{next_start_index + 1} - #{min(next_start_index + QUIZ_SIZE, total_words)})", on_click=advance_quiz_index, type="secondary")
+        else:
+            st.info("You have completed all available words in the database!")
+            st.session_state.quiz_start_index = 0
+            st.button("Restart Quiz from Word #1", on_click=advance_quiz_index, type="secondary")
+            
         return
     
     # --- Active Quiz Form ---
@@ -428,13 +495,14 @@ def generate_quiz_ui():
     # 🟢 QUIZ CHANGE: Show all questions in one form
     with st.form(key="full_quiz_form"):
         st.subheader(f"Answer the following {QUIZ_SIZE} questions:")
+        st.caption(f"Testing words **{start_word_num}** to **{end_word_num}**.")
         
         # Collect user responses in a list
         st.session_state.user_responses = [] 
         
         for i, q in enumerate(quiz_details):
             # 🟢 CHANGE: Use the word's original index number for display
-            st.markdown(f"#### **Question {i + 1} (Word #{q['index']}). Define: {q['word'].upper()}**") 
+            st.markdown(f"#### **Word #{q['index']}. Define: {q['word'].upper()}**") 
             
             # Key must be unique per question
             user_choice = st.radio(
@@ -536,12 +604,14 @@ def main():
                 st.rerun()
                 
     # --- Main Content ---
+    # 🟢 CHANGE: Load data immediately (FAST)
+    load_and_update_vocabulary_data() 
+    
     if not st.session_state.is_auth:
         st.info("Please log in using the sidebar to access the Vocabulary Builder.")
     else:
-        # Initial check to load 10 words if none are loaded
-        if not st.session_state.vocab_data:
-            load_or_extract_initial_vocabulary(required_count=LOAD_BATCH_SIZE)
+        # 🟢 CHANGE: Trigger the background extraction check (SLOW)
+        check_and_start_auto_extraction()
             
         # Use tabs for the main features
         tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ AI Tools"])

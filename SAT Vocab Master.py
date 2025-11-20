@@ -45,9 +45,12 @@ except Exception as e:
 
 # Use a local JSON file for persistent storage
 JSON_FILE_PATH = "vocab_data.json" 
-# Target is 2000 words, but we load in batches of 10 for display
+# Target is the ultimate goal, but we use a smaller target for AUTO-EXTRACTION
 REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
+# 🟢 CHANGE: New target size for automatic extraction upon startup
+AUTO_EXTRACT_TARGET_SIZE = 200 
+AUTO_EXTRACT_BATCH = 5 # How many words to extract automatically if under target
 
 # Pydantic Schema for Structured AI Output - UPDATED to store audio URL
 class SatWord(BaseModel):
@@ -188,25 +191,33 @@ def load_or_extract_initial_vocabulary(required_count: int = LOAD_BATCH_SIZE):
     if st.session_state.vocab_data:
         st.info(f"✅ Loaded {word_count} words from local file.")
 
-    # 2. Check if the initial required count (10 words) is met
+    # 🟢 CHANGE: Automatic extraction logic on startup if word count is below target
+    if word_count < AUTO_EXTRACT_TARGET_SIZE:
+        
+        # Calculate how many words we need, capped at our small batch size
+        words_to_extract = min(AUTO_EXTRACT_TARGET_SIZE - word_count, AUTO_EXTRACT_BATCH)
+        
+        if words_to_extract > 0:
+            st.info(f"Auto-extracting {words_to_extract} new words in the background...")
+            
+            existing_words = [d['word'] for d in st.session_state.vocab_data]
+            
+            # 3. Call the real AI function
+            new_words = real_llm_vocabulary_extraction(words_to_extract, existing_words)
+            
+            if new_words:
+                # 4. Add new words to the list and save
+                st.session_state.vocab_data.extend(new_words)
+                save_vocabulary_to_file(st.session_state.vocab_data)
+                st.success(f"✅ Auto-extracted {len(new_words)} words. Total words available: {len(st.session_state.vocab_data)}")
+            else:
+                st.error("Could not automatically generate new words.")
+    
+    # 2. Check if the initial required count (10 words for display) is met
     if word_count < required_count:
-        words_to_extract = required_count - word_count
-        st.warning(f"Need {words_to_extract} more words for initial load. Triggering AI extraction...")
-        
-        existing_words = [d['word'] for d in st.session_state.vocab_data]
-        
-        # 3. Call the real AI function (limited to the initial missing amount)
-        new_words = real_llm_vocabulary_extraction(words_to_extract, existing_words)
-        
-        if new_words:
-            # 4. Add new words to the list and save
-            st.session_state.vocab_data.extend(new_words)
-            save_vocabulary_to_file(st.session_state.vocab_data)
-            st.success(f"✅ Added {len(new_words)} words. Total words available: {len(st.session_state.vocab_data)}")
-        else:
-            st.error("Could not generate new words. Check API key and internet connection.")
+        st.info("Initial words for display are loaded.")
     else:
-        st.info(f"✅ Ready to start.")
+        st.info(f"✅ Ready to start. Database size: {len(st.session_state.vocab_data)}")
 
 # --- Login Handler (Defined before main() to prevent NameError) ---
 def handle_login(user_id, password):
@@ -235,7 +246,7 @@ def load_more_words():
         # We only extract up to the LOAD_BATCH_SIZE in one go
         extraction_limit = min(words_to_extract, LOAD_BATCH_SIZE)
         
-        st.info(f"Automatically extracting {extraction_limit} new words...")
+        st.info(f"Manually extracting {extraction_limit} new words...")
         
         existing_words = [d['word'] for d in st.session_state.vocab_data]
         new_words = real_llm_vocabulary_extraction(extraction_limit, existing_words)
@@ -383,8 +394,8 @@ def generate_quiz_ui():
         # Display feedback for each question
         st.subheader("Review Your Answers")
         for i, result in enumerate(st.session_state.quiz_results['feedback']):
-            color = "green" if result['is_correct'] else "red"
-            st.markdown(f"#### **{i+1}. {result['word']}**")
+            # 🟢 CHANGE: Use i+1 for question numbering in results review
+            st.markdown(f"#### **{i+1}. {result['word']}**") 
             st.markdown(f"**Your Answer:** {result['user_choice']}")
             st.markdown(f"**Correct Answer:** {result['correct_answer']}")
             
@@ -411,7 +422,8 @@ def generate_quiz_ui():
         st.session_state.user_responses = [] 
         
         for i, q in enumerate(quiz_details):
-            st.markdown(f"#### **{i + 1}. Define: {q['word'].upper()}**")
+            # 🟢 CHANGE: Use i+1 for question numbering in the active quiz form
+            st.markdown(f"#### **{i + 1}. Define: {q['word'].upper()}**") 
             
             # Key must be unique per question
             user_choice = st.radio(
@@ -467,33 +479,19 @@ def generate_quiz_ui():
 
 def admin_extraction_ui():
     """Renders the Admin Extraction feature."""
-    st.header("💡 AI Extraction & Data Management", divider="orange")
+    # 🟢 CHANGE: Removed "AI Extraction & Data Management" title
+    st.header("💡 Data Management", divider="orange") 
     
     st.markdown(f"""
     **Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).
     
-    The application uses the Gemini AI (for text) and public web audio links for pronunciation.
+    The application automatically extracts new words upon startup until it reaches {AUTO_EXTRACT_TARGET_SIZE} words.
     """)
-    
-    # 🔴 Removed Unneeded TTS Test Tool
     
     st.markdown("---")
     
-    # Admin Action: Manually trigger extraction
-    if st.button("Manually Extract 5 New Words (Real AI Call)", type="secondary"):
-        
-        existing_words = [d['word'] for d in st.session_state.vocab_data]
-        new_batch = real_llm_vocabulary_extraction(5, existing_words)
-        
-        if new_batch:
-            st.session_state.vocab_data.extend(new_batch)
-            save_vocabulary_to_file(st.session_state.vocab_data)
-            st.success(f"✅ Extracted and added {len(new_batch)} words. Total: {len(st.session_state.vocab_data)}")
-            # Reset display to current count if extraction occurs
-            st.session_state.words_displayed = len(st.session_state.vocab_data) 
-            st.rerun()
-        else:
-            st.error("Failed to generate new words. Check API key and internet connection.")
+    # 🔴 Removed Manual Extraction Button (enforcing auto-extraction)
+    st.info("Word extraction is now automatic upon app startup until the target is met.")
 
 # ----------------------------------------------------------------------
 # 5. STREAMLIT APPLICATION STRUCTURE

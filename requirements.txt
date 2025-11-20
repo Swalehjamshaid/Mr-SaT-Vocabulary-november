@@ -1,3 +1,5 @@
 streamlit
 pydantic
 google-genai
+gtts
+pydub

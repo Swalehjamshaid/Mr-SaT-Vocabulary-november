@@ -9,7 +9,6 @@ from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
-# --- Removed gTTS/io imports since we will use direct URL ---
 # ----------------------------------------------------
 
 # --- AI & STRUCTURED OUTPUT LIBRARIES ---
@@ -297,7 +296,8 @@ def display_vocabulary_ui():
                 # -----------------------
 
                 st.markdown(f"**Definition:** {definition.capitalize()}")
-                st.markdown(f"**Memory Tip:** *{tip}*")
+                # 🟢 MEMORY TIP DISPLAY: This is already present and working.
+                st.markdown(f"**Memory Tip:** *{tip}*") 
                 st.markdown(f"**Usage:** *'{usage}'*")
 
     # Load More Button
@@ -309,85 +309,155 @@ def display_vocabulary_ui():
 def start_new_quiz():
     """Initializes the quiz in session state."""
     words = st.session_state.vocab_data
-    QUIZ_SIZE = 10 # Quiz size is 10 questions
+    # 🟢 QUIZ CHANGE: Set QUIZ_SIZE to 5 questions
+    QUIZ_SIZE = 5 
     
     if len(words) < 4:
         st.error("Not enough words for a meaningful quiz. Need at least 4 unique words.")
         return
 
+    # Select 5 random words for the quiz
     quiz_words = random.sample(words, min(QUIZ_SIZE, len(words)))
     
-    st.session_state.quiz_data = quiz_words
-    st.session_state.current_question_index = 0
-    st.session_state.score = 0
+    # Store quiz details for accurate scoring later
+    quiz_details = []
+    all_definitions = [d['definition'].capitalize() for d in words]
+    
+    for question_data in quiz_words:
+        correct_answer = question_data['definition'].capitalize()
+        
+        # Select 3 unique decoy definitions from the full list
+        decoys = random.sample([
+            d for d in all_definitions if d != correct_answer
+        ], min(3, len([d for d in all_definitions if d != correct_answer])))
+        
+        options = [correct_answer] + decoys
+        random.shuffle(options)
+        
+        quiz_details.append({
+            "word": question_data['word'],
+            "correct_answer": correct_answer,
+            "tip": question_data['tip'],
+            "usage": question_data['usage'],
+            "options": options
+        })
+        
+    st.session_state.quiz_details = quiz_details
     st.session_state.quiz_active = True
-    st.session_state.quiz_feedback = ""
+    st.session_state.quiz_results = None # Store results after submission
 
+# 🟢 QUIZ CHANGE: Function now processes all questions at once
 def generate_quiz_ui():
     """Renders the Quiz Section feature."""
     st.header("📝 Vocabulary Quiz", divider="green")
-
+    
+    # QUIZ SIZE is 5 questions now
+    QUIZ_SIZE = 5
+    
     if not st.session_state.vocab_data or len(st.session_state.vocab_data) < 4:
         st.info("A minimum of 4 words is required to start a quiz.")
         return
 
     if not st.session_state.quiz_active:
-        st.button("Start New Quiz", on_click=start_new_quiz, type="primary")
+        st.button(f"Start New {QUIZ_SIZE}-Question Quiz", on_click=start_new_quiz, type="primary")
         return
     
-    # --- Active Quiz Logic ---
-    q_index = st.session_state.current_question_index
-    quiz_data = st.session_state.quiz_data
-    total_questions = len(quiz_data)
-    
-    if q_index >= total_questions:
-        st.balloons()
-        st.success(f"Quiz Complete! Final Score: **{st.session_state.score}** out of **{total_questions}**")
-        st.session_state.quiz_active = False # Reset quiz
-        st.session_state.quiz_feedback = ""
-        st.button("Try Another Quiz", on_click=start_new_quiz)
+    # --- Results Display ---
+    if st.session_state.quiz_results is not None:
+        score = st.session_state.quiz_results['score']
+        total = st.session_state.quiz_results['total']
+        accuracy = st.session_state.quiz_results['accuracy']
+        
+        if score == total:
+            st.balloons()
+            st.success(f"🎉 Quiz Complete! Perfect Score! {score} out of {total} (Accuracy: {accuracy}%)")
+        else:
+            st.warning(f"Quiz Complete! Final Score: **{score}** out of **{total}** (Accuracy: {accuracy}%)")
+            
+        # Display feedback for each question
+        st.subheader("Review Your Answers")
+        for i, result in enumerate(st.session_state.quiz_results['feedback']):
+            color = "green" if result['is_correct'] else "red"
+            st.markdown(f"#### **{i+1}. {result['word']}**")
+            st.markdown(f"**Your Answer:** {result['user_choice']}")
+            st.markdown(f"**Correct Answer:** {result['correct_answer']}")
+            
+            if not result['is_correct']:
+                 st.markdown(f"**Memory Tip:** *{result['tip']}*")
+                 st.markdown(f"**Usage:** *'{result['usage']}'*")
+            
+            st.markdown("---")
+            
+        st.session_state.quiz_active = False # Reset quiz state
+        st.session_state.quiz_results = None # Clear results
+        st.button(f"Start Another {QUIZ_SIZE}-Question Quiz", on_click=start_new_quiz)
         return
+    
+    # --- Active Quiz Form ---
+    
+    quiz_details = st.session_state.quiz_details
+    
+    # 🟢 QUIZ CHANGE: Show all questions in one form
+    with st.form(key="full_quiz_form"):
+        st.subheader(f"Answer the following {QUIZ_SIZE} questions:")
+        
+        # Collect user responses in a list
+        st.session_state.user_responses = [] 
+        
+        for i, q in enumerate(quiz_details):
+            st.markdown(f"#### **{i + 1}. Define: {q['word'].upper()}**")
+            
+            # Key must be unique per question
+            user_choice = st.radio(
+                "Select the correct definition:", 
+                q['options'], 
+                key=f"quiz_q_{i}", 
+                index=None,
+                label_visibility="collapsed"
+            )
+            # Store the selected answer (or None) for submission processing
+            st.session_state.user_responses.append(user_choice)
 
-    question_data = quiz_data[q_index]
-    
-    st.markdown(f"**Question {q_index + 1} of {total_questions}**")
-    st.subheader(f"Define: **{question_data['word'].upper()}**")
-    
-    correct_answer = question_data['definition'].capitalize()
-    
-    # Select 3 incorrect definitions (decoys)
-    all_words = st.session_state.vocab_data
-    decoys = []
-    while len(decoys) < 3:
-        decoy_word = random.choice(all_words)
-        decoy_definition = decoy_word['definition'].capitalize()
-        # Ensure decoy is not the correct answer and is not already a decoy
-        if decoy_definition != correct_answer and decoy_definition not in decoys:
-            decoys.append(decoy_definition)
-
-    options = [correct_answer] + decoys
-    random.shuffle(options)
-    
-    with st.form(key=f"quiz_form_{q_index}"):
-        user_choice = st.radio("Select the correct definition:", options, index=None)
-        submitted = st.form_submit_button("Submit Answer")
+        submitted = st.form_submit_button("Submit All Answers")
 
         if submitted:
-            if user_choice is None:
-                st.error("Please select an option before submitting.")
-            else:
-                if user_choice == correct_answer:
-                    st.session_state.score += 1
-                    st.session_state.quiz_feedback = f"🎉 **Correct!** Score: {st.session_state.score}/{q_index + 1}"
-                else:
-                    st.session_state.quiz_feedback = f"😔 **Incorrect.** The correct answer was: **{correct_answer}**\n\n**Tip:** {question_data['tip']}\n\n**Usage:** *'{question_data['usage']}'*"
+            final_score = 0
+            feedback_list = []
+            
+            # Check if all fields were answered (basic validation)
+            if any(response is None for response in st.session_state.user_responses):
+                st.error("Please answer ALL questions before submitting.")
+                # We return here to keep the form active until all are answered
+                return
+
+            # Process responses
+            for i, response in enumerate(st.session_state.user_responses):
+                q = quiz_details[i]
+                is_correct = (response == q['correct_answer'])
                 
-                # Move to next question
-                st.session_state.current_question_index += 1
-                st.rerun()
-    
-    if st.session_state.quiz_feedback:
-        st.markdown(st.session_state.quiz_feedback)
+                if is_correct:
+                    final_score += 1
+                
+                feedback_list.append({
+                    "word": q['word'],
+                    "user_choice": response,
+                    "correct_answer": q['correct_answer'],
+                    "is_correct": is_correct,
+                    "tip": q['tip'],
+                    "usage": q['usage']
+                })
+            
+            # Store final results
+            st.session_state.quiz_results = {
+                "score": final_score,
+                "total": QUIZ_SIZE,
+                "accuracy": round((final_score / QUIZ_SIZE) * 100, 1),
+                "feedback": feedback_list
+            }
+            # Clear intermediate responses
+            del st.session_state.user_responses
+            st.rerun()
+
 
 def admin_extraction_ui():
     """Renders the Admin Extraction feature."""
@@ -399,28 +469,8 @@ def admin_extraction_ui():
     The application uses the Gemini AI (for text) and public web audio links for pronunciation.
     """)
     
-    # --- Manual TTS Test Tool ---
-    st.subheader("🔊 Audio Pronunciation Test")
-    st.markdown("This uses a direct, public audio URL for maximum compatibility.")
-    test_word = st.text_input("Enter word to test audio:", value="ephemeral")
+    # 🔴 Removed Unneeded TTS Test Tool
     
-    if st.button("Test Pronunciation"):
-        if test_word:
-            test_url = construct_tts_url(test_word)
-            
-            if test_url:
-                audio_html = f"""
-                    <audio controls autoplay style="width: 100%;" src="{test_url}">
-                        Your browser does not support the audio element.
-                    </audio>
-                """
-                st.markdown(audio_html, unsafe_allow_html=True)
-                st.success(f"Audio stream successfully generated for '{test_word}'.")
-            else:
-                st.error(f"Failed to generate audio URL for '{test_word}'.")
-        else:
-            st.warning("Please enter a word to test.")
-
     st.markdown("---")
     
     # Admin Action: Manually trigger extraction

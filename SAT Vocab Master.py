@@ -231,6 +231,79 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     
     return words_with_audio
 
+def handle_manual_word_entry(word: str):
+    """Generates pronunciation and LLM content for a single word and saves it."""
+    
+    if not word:
+        st.error("Please enter a word.")
+        return
+
+    st.info(f"Generating data for '{word}'...")
+    
+    # 1. Generate Pronunciation Audio (Manual Step 1: TTS)
+    audio_data = generate_tts_audio(word)
+    if not audio_data:
+        st.error(f"🔴 Failed to generate pronunciation audio for '{word}'. Please check API key and retry.")
+        return
+
+    # 2. Generate Definition, Tip, and Usage (Manual Step 2: LLM)
+    prompt = f"Generate the pronunciation, definition, mnemonic tip, and a usage sentence for the high-level SAT word: {word}. Return only the JSON object."
+    
+    try:
+        list_schema = {"type": "array", "items": SatWord.model_json_schema()}
+        config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
+        
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt, config=config
+        )
+        
+        # Parse the JSON response
+        data_list = json.loads(response.text)
+        if not data_list or not isinstance(data_list, list) or 'word' not in data_list[0]:
+            raise ValueError("LLM returned invalid data structure.")
+            
+        new_word_data = SatWord(**data_list[0]).model_dump()
+        
+    except Exception as e:
+        st.error(f"🔴 Failed to generate content for '{word}'. Error: {e}")
+        return
+
+    # 3. Combine Data and Save
+    new_word_data['audio_base64'] = audio_data
+    
+    if new_word_data['word'].lower() != word.lower():
+        st.warning(f"Note: LLM corrected the word to '{new_word_data['word']}'. Using LLM's version.")
+
+    st.session_state.vocab_data.insert(0, new_word_data) # Insert at top for visibility
+    save_vocabulary_to_file(st.session_state.vocab_data)
+    st.success(f"✅ Manually added '{new_word_data['word']}' with working pronunciation!")
+    st.rerun()
+
+def handle_fix_single_audio(word_index: int):
+    """Generates missing audio for a single word and saves the update."""
+    
+    if word_index < 0 or word_index >= len(st.session_state.vocab_data):
+        st.error("Invalid word index.")
+        return
+        
+    word_data = st.session_state.vocab_data[word_index]
+    word = word_data['word']
+    
+    st.info(f"Attempting to fix pronunciation for '{word}'...")
+    
+    # Generate the missing audio
+    audio_data = generate_tts_audio(word)
+    
+    if audio_data:
+        st.session_state.vocab_data[word_index]['audio_base64'] = audio_data
+        save_vocabulary_to_file(st.session_state.vocab_data)
+        st.success(f"✅ Successfully fixed audio for '{word}'.")
+    else:
+        st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
+    
+    st.rerun()
+
+
 def fill_missing_audio(vocab_data: List[Dict]) -> bool:
     """
     Iterates through existing vocabulary and generates missing audio for corrupted entries.
@@ -240,34 +313,11 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
     if not words_to_fix:
         return False
 
-    st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. Attempting to generate...")
+    st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. The system will attempt to fix them on load, or you can use the 'Fix Audio' button next to each word.")
     
-    # Use a progress bar for the slow step
-    progress_bar = st.progress(0, text=f"Fixing audio for 0 of {len(words_to_fix)} words...")
-    
-    changes_made = False
-    
-    for i, word_data in enumerate(vocab_data):
-        if word_data.get('audio_base64') is None:
-            word = word_data['word']
-            # Generate the missing audio
-            audio_data = generate_tts_audio(word)
-            
-            if audio_data:
-                word_data['audio_base64'] = audio_data
-                changes_made = True
-            
-            progress = (i + 1) / len(vocab_data) # Progress based on total list length
-            progress_bar.progress(progress, text=f"Fixing audio for {i+1} words...")
-
-    progress_bar.empty()
-    
-    if changes_made:
-        save_vocabulary_to_file(vocab_data)
-        st.success(f"✅ Successfully fixed audio for some words.")
-        return True
-    
-    return False
+    # We now rely more on the per-word button to prevent session timeout issues
+    # that occur during bulk fixing on slow servers.
+    return False # Do not force rerun for bulk fix anymore, let user use button
 
 
 def load_and_update_vocabulary_data():
@@ -278,9 +328,8 @@ def load_and_update_vocabulary_data():
     
     st.session_state.vocab_data = load_vocabulary_from_file()
     
-    # 1. CONTINUOUS PRONUNCIATION CHECK: Fix any existing corrupted entries
-    if fill_missing_audio(st.session_state.vocab_data):
-        st.rerun() # Rerun immediately if any audio was fixed, to update the UI
+    # 1. CONTINUOUS PRONUNCIATION CHECK: Check and display warning, but don't force bulk fix.
+    fill_missing_audio(st.session_state.vocab_data)
         
     word_count = len(st.session_state.vocab_data)
     
@@ -417,7 +466,18 @@ def display_vocabulary_ui():
                     """
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
+                    # Show Fix Audio Button if audio is missing
                     st.warning("Audio not available for this word. TTS generation may have failed.")
+                    
+                    if st.session_state.is_admin:
+                        # Add a button unique to this word's index
+                        st.button(
+                            f"Fix Audio for #{word_number}", 
+                            key=f"fix_audio_{i}", 
+                            on_click=handle_fix_single_audio, 
+                            args=(i,),
+                            type="primary"
+                        )
 
                 st.markdown(f"**Definition:** {definition.capitalize()}")
                 st.markdown(f"**Memory Tip:** *{tip}*") 
@@ -610,6 +670,17 @@ def admin_extraction_ui():
         st.warning("You must be logged in as the Admin to use this tool.")
         return
 
+    # --- Manual Single Word Entry ---
+    st.subheader("Manual Word & Pronunciation Entry")
+    with st.form(key="manual_word_form"):
+        manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input").strip()
+        manual_submit = st.form_submit_button("Generate Pronunciation & Content")
+        
+        if manual_submit:
+            handle_manual_word_entry(manual_word)
+
+    st.markdown("---")
+
     # --- User Management & Progress Tracking (MOCK) ---
     st.subheader("User Progress Overview")
     st.warning("⚠️ User progress tracking is disabled because a reliable shared database (Firebase) could not be installed.")
@@ -626,7 +697,7 @@ def admin_extraction_ui():
     st.markdown("---")
     
     # --- Manual Extraction Override (Admin Only) ---
-    st.subheader("Vocabulary Extraction")
+    st.subheader("Vocabulary Extraction (Bulk)")
     st.markdown(f"**Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).")
 
     if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): 

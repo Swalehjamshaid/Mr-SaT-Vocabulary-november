@@ -11,11 +11,11 @@ from pydantic import json_schema
 # --- New Imports for gTTS and Audio Processing ---
 try:
     from gtts import gTTS
-    from pydub import AudioSegment
     import io
 except ImportError:
-    st.error("ERROR: The 'gtts' and 'pydub' libraries are required.")
-    st.error("Please ensure they are in requirements.txt and installed.")
+    # This block ensures the app stops if gtts is missing, preventing later errors.
+    st.error("ERROR: The 'gtts' library is required.")
+    st.error("Please ensure it is in requirements.txt and installed.")
     st.stop()
 # ----------------------------------------------------
 
@@ -108,7 +108,7 @@ def save_vocabulary_to_file(data: List[Dict]):
 def generate_gtts_audio(text: str) -> Optional[str]:
     """
     Generates audio using gTTS, converts it to base64, and returns the string.
-    This replaces the unreliable Gemini TTS API call.
+    This relies only on gTTS and standard Python IO, making it Streamlit Cloud friendly.
     """
     try:
         # 1. Create gTTS object and save to an in-memory byte buffer

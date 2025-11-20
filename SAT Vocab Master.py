@@ -271,6 +271,9 @@ def display_vocabulary_ui():
     # Use a scrollable container for the words being shown
     with st.container(height=500, border=True):
         for i, data in enumerate(st.session_state.vocab_data[:words_to_show]):
+            # 🟢 CHANGE: Calculate the word number based on the index (i)
+            word_number = i + 1 
+            
             word = data.get('word', 'N/A').upper()
             pronunciation = data.get('pronunciation', 'N/A')
             definition = data.get('definition', 'N/A')
@@ -279,7 +282,10 @@ def display_vocabulary_ui():
             audio_url = data.get('audio_url') # 🟢 READ AUDIO URL DIRECTLY FROM DATABASE
             
             
-            with st.expander(f"**{word}** - {pronunciation}"):
+            # 🟢 CHANGE: Prepend the word number to the expander title
+            expander_title = f"**{word_number}.** {word} - {pronunciation}"
+            
+            with st.expander(expander_title):
                 
                 # --- AUDIO PLAYBACK ---
                 if audio_url:

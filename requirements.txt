@@ -3,3 +3,4 @@ pydantic
 google-genai
 firebase
 pyrebase4
+gTTS

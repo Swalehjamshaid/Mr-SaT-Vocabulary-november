@@ -9,11 +9,8 @@ from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
-# --- Python Library for TTS ---
-from gtts import gTTS
-import io
 
-# --- GEMS API ---
+# --- GEMS API (The library that handles TTS audio generation) ---
 try:
     from google import genai
     from google.genai import types
@@ -55,7 +52,7 @@ QUIZ_SIZE = 5
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
 ADMIN_PASSWORD = "Jamshaid,1981" 
-# 🟢 CHANGE: Manual extraction batch size set to 50 for the Admin button
+# Manual extraction batch size set to 50 for the Admin button
 MANUAL_EXTRACT_BATCH = 50 
 
 
@@ -67,7 +64,7 @@ class SatWord(BaseModel):
     tip: str = Field(description="A short, catchy mnemonic memory tip.")
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
-    # The audio field now stores MP3 Base64 data from gTTS
+    # The audio field now stores WAV Base64 data from Gemini TTS
     audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
 
 # ----------------------------------------------------------------------
@@ -106,33 +103,89 @@ def save_vocabulary_to_file(data: List[Dict]):
 # 3. AI EXTRACTION & AUDIO FUNCTIONS
 # ----------------------------------------------------------------------
 
+def pcm_to_wav(pcm_data: bytes, sample_rate: int) -> bytes:
+    """Converts raw PCM audio data into a standard WAV file format using only built-in libraries."""
+    
+    # 1. Prepare header components
+    channels = 1
+    bits_per_sample = 16
+    bytes_per_sample = bits_per_sample // 8
+    byte_rate = sample_rate * channels * bytes_per_sample
+    
+    # Total size of the PCM data
+    data_size = len(pcm_data)
+    
+    # 2. Construct the header
+    header = b'RIFF'                           # ChunkID
+    header += (36 + data_size).to_bytes(4, 'little') # ChunkSize
+    header += b'WAVE'                           # Format
+    header += b'fmt '                           # Subchunk1ID
+    header += (16).to_bytes(4, 'little')        # Subchunk1Size (16 for PCM)
+    header += (1).to_bytes(2, 'little')         # AudioFormat (1 for PCM)
+    header += channels.to_bytes(2, 'little')    # NumChannels
+    header += sample_rate.to_bytes(4, 'little') # SampleRate
+    header += byte_rate.to_bytes(4, 'little')   # ByteRate
+    header += bytes_per_sample.to_bytes(2, 'little') # BlockAlign
+    header += bits_per_sample.to_bytes(2, 'little')  # BitsPerSample
+    header += b'data'                           # Subchunk2ID
+    header += data_size.to_bytes(4, 'little')   # Subchunk2Size
+
+    return header + pcm_data
+
 def generate_tts_audio(text: str) -> Optional[str]:
-    """Generates audio via gTTS (Python Library) and returns Base64 encoded MP3 data."""
+    """Generates audio via Gemini TTS and returns Base64 encoded WAV data."""
     try:
-        # Create an in-memory file buffer (io.BytesIO) to avoid writing to the disk
-        fp = io.BytesIO()
+        # Use a reliable voice (Kore is a clear voice)
+        tts_config = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config={
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}
+            }
+        )
         
-        # Use gTTS to generate speech and save it to the in-memory buffer
-        tts = gTTS(text=text, lang='en')
-        tts.write_to_fp(fp)
+        # NOTE: Use gemini-2.5-flash-preview-tts for TTS
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash-preview-tts", 
+            contents=[{"parts": [{"text": text}]}], 
+            config=tts_config
+        )
+
+        # Extract base64 PCM data and mime type
+        audio_part = response.candidates[0].content.parts[0].inlineData
+        pcm_base64 = audio_part.data
+        mime_type = audio_part.mimeType # Should be audio/L16;rate=24000
         
-        # Move back to the start of the buffer
-        fp.seek(0)
+        if not pcm_base64 or 'audio/L16' not in mime_type:
+            # If API returns an error or empty data
+            return None
+            
+        # Extract sample rate from mime type (default to 24000 if extraction fails)
+        try:
+            # Safely extract rate from the mime type string
+            rate_match = [part for part in mime_type.split(';') if 'rate=' in part]
+            sample_rate = int(rate_match[0].split('=')[1]) if rate_match else 24000
+        except:
+            sample_rate = 24000
+
+        # Decode base64 PCM data
+        pcm_bytes = base64.b64decode(pcm_base64)
         
-        # Read the MP3 bytes and encode them to Base64
-        mp3_bytes = fp.read()
-        return base64.b64encode(mp3_bytes).decode('utf-8')
+        # Convert raw PCM bytes to WAV format
+        wav_bytes = pcm_to_wav(pcm_bytes, sample_rate)
+        
+        # Encode the final WAV bytes back to base64 for embedding in the HTML audio tag
+        return base64.b64encode(wav_bytes).decode('utf-8')
 
     except Exception as e:
-        # gTTS can fail if the network is bad or if the server itself is having issues
-        print(f"gTTS Generation failed for word: {text}. Error: {e}")
-        st.error(f"gTTS Audio Error: {e}")
+        # Log the detailed error but return None
+        print(f"TTS Generation failed for word: {text}. Error: {e}")
+        st.error(f"TTS Audio Error: {e}")
         return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
     1. Calls the Gemini API to generate structured vocabulary data.
-    2. Calls the gTTS library for each word to generate and encode the audio.
+    2. Calls the Gemini TTS model for each word to generate and encode the audio.
     """
     
     # --- Step 1: Generate Text Data (Remains the same using gemini-2.5-flash) ---
@@ -151,7 +204,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         st.error(f"🔴 Gemini Text Extraction Failed: {e}")
         return []
         
-    # --- Step 2: Generate and Attach Audio Data (gTTS) ---
+    # --- Step 2: Generate and Attach Audio Data (Gemini TTS) ---
     words_with_audio = []
     
     # We use a progress bar for the slow step
@@ -160,7 +213,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     for i, word_data in enumerate(validated_words):
         word = word_data['word']
         
-        # Call the gTTS function
+        # Call the TTS function (now using Gemini TTS)
         audio_data = generate_tts_audio(word)
         
         if audio_data:
@@ -310,10 +363,10 @@ def display_vocabulary_ui():
             
             with st.expander(expander_title):
                 
-                # --- AUDIO PLAYBACK (USES BASE64 MP3 DATA from gTTS) ---
+                # --- AUDIO PLAYBACK (USES BASE64 WAV DATA from Gemini TTS) ---
                 if audio_base64:
-                    # MIME type must be changed to audio/mp3 for gTTS output
-                    audio_data_url = f"data:audio/mp3;base64,{audio_base64}"
+                    # MIME type must be changed to audio/wav for Gemini TTS output
+                    audio_data_url = f"data:audio/wav;base64,{audio_base64}"
                     audio_html = f"""
                         <audio controls style="width: 100%;" src="{audio_data_url}">
                             Your browser does not support the audio element.
@@ -321,7 +374,7 @@ def display_vocabulary_ui():
                     """
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
-                    st.warning("Audio not available for this word. gTTS generation may have failed.")
+                    st.warning("Audio not available for this word. TTS generation may have failed.")
 
                 st.markdown(f"**Definition:** {definition.capitalize()}")
                 st.markdown(f"**Memory Tip:** *{tip}*") 

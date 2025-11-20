@@ -1,3 +1,4 @@
+
 import json
 import time
 import random
@@ -257,6 +258,50 @@ def handle_fix_single_audio(word_index: int):
     
     st.rerun()
 
+def handle_bulk_audio_fix():
+    """
+    Scans all loaded vocabulary data and attempts to generate and save missing audio
+    for every word that is currently corrupted (audio_base64 is None).
+    """
+    words_to_fix_indices = [i for i, d in enumerate(st.session_state.vocab_data) if d.get('audio_base64') is None]
+    
+    if not words_to_fix_indices:
+        st.success("All loaded words already have pronunciation audio!")
+        return
+
+    status_placeholder = st.empty()
+    fixed_count = 0
+    total_count = len(words_to_fix_indices)
+
+    status_placeholder.info(f"Starting bulk fix for {total_count} corrupted words...")
+    
+    # Note: Using st.session_state.vocab_data directly for updates
+    for i, index in enumerate(words_to_fix_indices):
+        word_data = st.session_state.vocab_data[index]
+        word = word_data['word']
+
+        status_placeholder.progress((i + 1) / total_count, 
+                                    text=f"Fixing {word}... ({i + 1}/{total_count} processed)")
+
+        # 1. Generate the missing audio (using gTTS)
+        audio_data = generate_tts_audio(word)
+
+        if audio_data:
+            st.session_state.vocab_data[index]['audio_base64'] = audio_data
+            fixed_count += 1
+        # If gTTS fails, we skip this word and continue to the next one
+        time.sleep(0.5) # Throttle to prevent immediate session timeout/rate limiting
+
+    # 2. Save all successful changes in one go
+    if fixed_count > 0:
+        save_vocabulary_to_file(st.session_state.vocab_data)
+        st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
+    else:
+        st.error(f"🔴 Bulk fix attempted, but audio generation failed for all {total_count} words. Check server logs/quotas.")
+        
+    status_placeholder.empty()
+    st.rerun()
+
 
 def fill_missing_audio(vocab_data: List[Dict]) -> bool:
     """
@@ -267,10 +312,8 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
     if not words_to_fix:
         return False
 
-    st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. The system will attempt to fix them on load, or you can use the 'Fix Audio' button next to each word.")
+    st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. Use the 'Fix Audio' button next to each word or the 'Bulk Fix' tool.")
     
-    # We now rely more on the per-word button to prevent session timeout issues
-    # that occur during bulk fixing on slow servers.
     return False # Do not force rerun for bulk fix anymore, let user use button
 
 
@@ -634,6 +677,19 @@ def admin_extraction_ui():
             handle_manual_word_entry(manual_word)
 
     st.markdown("---")
+    
+    # 🟢 NEW: BULK AUDIO FIX SECTION
+    st.subheader("Audio Integrity & Bulk Fix")
+    st.markdown(f"**Corrupted Entries:** {len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])} words currently missing audio.")
+
+    st.button(
+        "Attempt Bulk Audio Fix (Fix All Missing Pronunciations)", 
+        on_click=handle_bulk_audio_fix, 
+        type="primary"
+    )
+
+    st.markdown("---")
+
 
     # --- User Management & Progress Tracking (MOCK) ---
     st.subheader("User Progress Overview")

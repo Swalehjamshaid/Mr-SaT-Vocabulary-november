@@ -25,7 +25,10 @@ except ImportError:
 # ======================================================================
 
 # Check for API Key (Gemini)
-if "GEMINI_API_KEY" not in os.environ:
+if "GEMINI_API_KEY" in os.environ:
+    # Use the API key provided in the secrets file
+    api_key = os.environ["GEMINI_API_KEY"]
+else:
     st.error("🔴 GEMINI_API_KEY is missing! Please set it in your secrets.")
     st.stop()
 
@@ -41,7 +44,7 @@ except Exception as e:
 JSON_FILE_PATH = "vocab_data.json" 
 REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
-AUTO_EXTRACT_TARGET_SIZE = 200 
+AUTO_EXTRACT_TARGET_SIZE = 200 # Target for automatic extraction attempts
 QUIZ_SIZE = 5 
 
 # Admin Configuration (Mock Login)
@@ -227,7 +230,8 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
 
 def load_and_update_vocabulary_data():
     """
-    Loads existing data from local file (FAST) and checks initial word count.
+    Loads existing data from local file (FAST) and implements aggressive goal-seeking extraction.
+    This function will try to fill the vocabulary up to AUTO_EXTRACT_TARGET_SIZE.
     """
     if not st.session_state.is_auth: return
     
@@ -237,19 +241,42 @@ def load_and_update_vocabulary_data():
     if word_count > 0:
         st.info(f"✅ Loaded {word_count} words from local file.")
     
-    # Check if the initial required count (10 words for display) is met
-    if word_count < LOAD_BATCH_SIZE:
-        st.warning(f"Need {LOAD_BATCH_SIZE - word_count} more words for initial display. Triggering extraction now...")
+    # --- Aggressive Auto-Extraction Logic ---
+    if word_count < AUTO_EXTRACT_TARGET_SIZE:
+        words_needed = AUTO_EXTRACT_TARGET_SIZE - word_count
+        # Calculate how many full batches we need (use LOAD_BATCH_SIZE as the extraction unit)
+        batches_to_extract = words_needed // LOAD_BATCH_SIZE
         
-        # Blocking extraction for initial display
+        if batches_to_extract > 0:
+            st.warning(f"Need {words_needed} more words. Triggering {LOAD_BATCH_SIZE} word extraction now...")
+            
+            # Use LOAD_BATCH_SIZE (10) as the extraction amount, even if less is needed, to be efficient.
+            num_to_extract = LOAD_BATCH_SIZE 
+
+            # Blocking extraction 
+            existing_words = [d['word'] for d in st.session_state.vocab_data]
+            new_words = real_llm_vocabulary_extraction(num_to_extract, existing_words)
+            
+            if new_words:
+                st.session_state.vocab_data.extend(new_words)
+                save_vocabulary_to_file(st.session_state.vocab_data)
+                st.success(f"✅ Added {len(new_words)} words. Current total: {len(st.session_state.vocab_data)}.")
+                st.rerun() 
+            else:
+                st.error("🔴 Failed to generate new words. Check API key and logs.")
+    
+    # Check if we need initial words for display (LOAD_BATCH_SIZE = 10)
+    elif word_count < LOAD_BATCH_SIZE:
+        st.warning(f"Need {LOAD_BATCH_SIZE} words for initial display. Triggering extraction...")
+        # Blocking extraction for initial display (this handles the very first load)
         existing_words = [d['word'] for d in st.session_state.vocab_data]
-        new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE - word_count, existing_words)
+        new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE, existing_words)
         
         if new_words:
             st.session_state.vocab_data.extend(new_words)
             save_vocabulary_to_file(st.session_state.vocab_data)
             st.success(f"✅ Initial {len(new_words)} words generated and saved.")
-            st.rerun() 
+            st.rerun()
 
 
 # --- Mock Authentication Handlers (Based on previous correct implementation) ---

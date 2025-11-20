@@ -1,4 +1,6 @@
 streamlit
+pyrebase4
+firebase-admin
 pydantic
 google-genai
 firebase

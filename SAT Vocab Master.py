@@ -231,20 +231,63 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     
     return words_with_audio
 
+def fill_missing_audio(vocab_data: List[Dict]) -> bool:
+    """
+    Iterates through existing vocabulary and generates missing audio for corrupted entries.
+    Returns True if any changes were made and saved, forcing a rerun.
+    """
+    words_to_fix = [d for d in vocab_data if d.get('audio_base64') is None]
+    if not words_to_fix:
+        return False
+
+    st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. Attempting to generate...")
+    
+    # Use a progress bar for the slow step
+    progress_bar = st.progress(0, text=f"Fixing audio for 0 of {len(words_to_fix)} words...")
+    
+    changes_made = False
+    
+    for i, word_data in enumerate(vocab_data):
+        if word_data.get('audio_base64') is None:
+            word = word_data['word']
+            # Generate the missing audio
+            audio_data = generate_tts_audio(word)
+            
+            if audio_data:
+                word_data['audio_base64'] = audio_data
+                changes_made = True
+            
+            progress = (i + 1) / len(vocab_data) # Progress based on total list length
+            progress_bar.progress(progress, text=f"Fixing audio for {i+1} words...")
+
+    progress_bar.empty()
+    
+    if changes_made:
+        save_vocabulary_to_file(vocab_data)
+        st.success(f"✅ Successfully fixed audio for some words.")
+        return True
+    
+    return False
+
+
 def load_and_update_vocabulary_data():
     """
-    Loads existing data from local file (FAST) and implements aggressive goal-seeking extraction.
-    This function will try to fill the vocabulary up to AUTO_EXTRACT_TARGET_SIZE (2000 words).
+    Loads existing data, checks for missing audio, and implements aggressive goal-seeking extraction.
     """
     if not st.session_state.is_auth: return
     
     st.session_state.vocab_data = load_vocabulary_from_file()
+    
+    # 1. CONTINUOUS PRONUNCIATION CHECK: Fix any existing corrupted entries
+    if fill_missing_audio(st.session_state.vocab_data):
+        st.rerun() # Rerun immediately if any audio was fixed, to update the UI
+        
     word_count = len(st.session_state.vocab_data)
     
     if word_count > 0:
         st.info(f"✅ Loaded {word_count} words from local file.")
     
-    # --- Aggressive Auto-Extraction Logic (aims for 2000 words in batches of 10) ---
+    # 2. AGGRESSIVE WORD EXTRACTION: Fill the vocabulary up to the 2000-word target
     if word_count < AUTO_EXTRACT_TARGET_SIZE:
         words_needed = AUTO_EXTRACT_TARGET_SIZE - word_count
         
@@ -268,7 +311,7 @@ def load_and_update_vocabulary_data():
             else:
                 st.error("🔴 Failed to generate new words. Check API key and logs.")
     
-    # This block handles the very first load when word_count is 0 
+    # This block handles the very first load when word_count is 0 and no continuous extraction has run
     elif word_count < LOAD_BATCH_SIZE:
         st.warning(f"Need {LOAD_BATCH_SIZE} words for initial display. Triggering extraction...")
         # Blocking extraction for initial display 

@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 # ----------------------------------------------------
 
-# --- AI & STRUCTURED OUTPUT LIBRARIES ---
+# --- FIREBASE & GEMS API ---
 try:
     from google import genai
     from google.genai import types
@@ -19,6 +19,20 @@ except ImportError:
     st.error("ERROR: The 'google-genai' and 'pydantic' libraries are required.")
     st.error("Please run: pip install google-genai pydantic")
     st.stop()
+
+# --- FIREBASE INITIALIZATION (MANDATORY) ---
+# NOTE: In the Canvas environment, Firebase credentials and user auth tokens are provided globally.
+# This app is being converted to use real Firebase for authentication and persistence.
+try:
+    from firebase import initialize_app, get_auth, sign_up, sign_in, sign_out, is_user_logged_in, get_user_id
+    
+    # 🚨 NOTE: Initializing Firebase is required for the new authentication system.
+    # The actual initialization is handled by the Canvas environment for security.
+    pass 
+except ImportError:
+    st.error("ERROR: Cannot import required Firebase module. This app MUST be run in a compatible environment.")
+    st.stop()
+
 
 # ======================================================================
 # *** LOCAL EXECUTION SETUP & FILE PATHS ***
@@ -37,26 +51,22 @@ if "GEMINI_API_KEY" not in os.environ and not ("__initial_auth_token__" in globa
     
 # Initialize Gemini Client (reads key from environment variable automatically)
 try:
-    # Client will automatically read the GEMINI_API_KEY environment variable
     gemini_client = genai.Client()
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# Use a local JSON file for persistent storage
+# Use a local JSON file for persistent storage (Fallback storage)
 JSON_FILE_PATH = "vocab_data.json" 
-# Target is the ultimate goal, but we use a smaller target for AUTO-EXTRACTION
+
 REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
-# 🟢 AUTO EXTRACTION TARGET AND BATCH: These constants are now unused but kept for clarity.
-AUTO_EXTRACT_TARGET_SIZE = 200 
-AUTO_EXTRACT_BATCH = 5 
 
-# 🟢 ADMIN CREDENTIALS
+# 🟢 ADMIN CREDENTIALS (Used for specific UI access control based on user email)
 ADMIN_EMAIL = "rot.jamshaid@gmail.com"
-ADMIN_PASSWORD = "Jamshaid,1981"
+# Admin password is used only for the Firebase sign_up if the user uses the Admin email.
 
-# Pydantic Schema for Structured AI Output - UPDATED to store audio URL
+# Pydantic Schema for Structured AI Output
 class SatWord(BaseModel):
     """Defines the exact structure for the AI-generated vocabulary word."""
     word: str = Field(description="The SAT-level word.")
@@ -65,21 +75,18 @@ class SatWord(BaseModel):
     tip: str = Field(description="A short, catchy mnemonic memory tip.")
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
-    # 🟢 FINAL AUDIO FIELD: Store the public URL instead of base64
     audio_url: Optional[str] = Field(default=None, description="Public URL for MP3 audio pronunciation.")
 
 # ----------------------------------------------------------------------
 # 2. DATA PERSISTENCE & STATE MANAGEMENT
 # ----------------------------------------------------------------------
 
-# Initialize Streamlit session state variables
-if 'current_user_id' not in st.session_state: st.session_state.current_user_id = None
+if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
 if 'is_auth' not in st.session_state: st.session_state.is_auth = False
 if 'vocab_data' not in st.session_state: st.session_state.vocab_data = []
 if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
-# 🟢 FLAG REMOVED: is_extracting flag is no longer needed.
 
 def load_vocabulary_from_file():
     """Loads vocabulary data from the local JSON file."""
@@ -108,20 +115,16 @@ def save_vocabulary_to_file(data: List[Dict]):
 def construct_tts_url(text: str) -> str:
     """
     Constructs a reliable TTS URL using Google's public endpoint.
-    This avoids the server-side network block.
     """
-    # URL is generated based on the text, permanently storing the link.
     encoded_text = urllib.parse.quote(text)
     return f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl=en&client=tw-ob"
 
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
-    1. Calls the Gemini API to generate structured vocabulary data.
-    2. Constructs the audio URL for each new word and stores it.
+    Calls the Gemini API to generate structured vocabulary data and constructs the audio URL.
     """
     
-    # --- Step 1: Generate Text Data (Remains the same using Gemini) ---
     prompt = f"""
     Generate {num_words} unique, extremely high-level SAT vocabulary words.
     The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}.
@@ -151,20 +154,13 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         st.error(f"🔴 Gemini Text Extraction Failed: {e}")
         return []
         
-    # --- Step 2: Generate and Attach Audio URL ---
-    
     words_with_audio = []
     
-    # We can keep this spinner, as it is short-lived and outside the main AI call
     with st.spinner(f"🔗 Constructing audio links for {len(validated_words)} words..."):
         
         for word_data in validated_words:
             word = word_data['word']
-            
-            # 🟢 FINAL FIX: Store the direct audio URL instead of relying on server-side generation
             audio_url = construct_tts_url(word)
-            
-            # Attach the URL directly to the word's data structure
             word_data['audio_url'] = audio_url
             words_with_audio.append(word_data)
 
@@ -173,21 +169,17 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
 def load_and_update_vocabulary_data():
     """
     Loads existing data (FAST) and ensures old words have the required audio URL (FAST).
-    This function must be kept non-blocking for quick app startup.
     """
-    # 1. Load existing data
     st.session_state.vocab_data = load_vocabulary_from_file()
     word_count = len(st.session_state.vocab_data)
     
-    # 🔴 Fix for old data: If old words don't have the audio_url field, generate it now.
+    # Fix for old data: If old words don't have the audio_url field, generate it now.
     words_missing_url = [d for d in st.session_state.vocab_data if d.get('audio_url') is None]
     if words_missing_url:
-        # Use a temporary spinner to avoid blocking the whole app
         with st.spinner("Updating audio links..."): 
             for word_data in words_missing_url:
                 word_data['audio_url'] = construct_tts_url(word_data['word'])
             
-        # Save the updated list (with newly generated audio URL)
         save_vocabulary_to_file(st.session_state.vocab_data)
 
     if word_count > 0:
@@ -203,74 +195,66 @@ def load_and_update_vocabulary_data():
             st.session_state.vocab_data.extend(new_words)
             save_vocabulary_to_file(st.session_state.vocab_data)
             st.success(f"✅ Initial {len(new_words)} words generated.")
-            st.rerun() # Rerun to properly display new words
+            st.rerun() 
 
 
-# --- Login Handler (Defined before main() to prevent NameError) ---
-def handle_login(user_id, password):
+# ----------------------------------------------------------------------
+# 4. AUTHENTICATION (USING FIREBASE)
+# ----------------------------------------------------------------------
+
+def handle_auth(action: str, email: str, password: str):
     """
-    Handles user login. Checks for hardcoded admin login first.
+    Handles Firebase sign-up or sign-in.
     """
-    if not user_id or not password:
+    if not email or not password:
         st.error("Please enter both Email and Password.")
         return
 
-    # 🟢 ADMIN LOGIN CHECK
-    if user_id == ADMIN_EMAIL and password == ADMIN_PASSWORD:
-        st.session_state.current_user_id = "Admin" 
-        st.session_state.is_auth = True
-        st.session_state.words_displayed = LOAD_BATCH_SIZE
-        st.session_state.quiz_start_index = 0
-        st.success(f"Logged in as: Admin ({ADMIN_EMAIL})! Access granted.")
-        load_and_update_vocabulary_data() 
-        return
-    
-    # 🟢 STANDARD USER LOGIN (MOCK)
-    # Since email verification is not possible, this remains a mock login/signup
-    if len(password) >= 4 and '@' in user_id:
-        st.session_state.current_user_id = user_id
-        st.session_state.is_auth = True
-        st.session_state.words_displayed = LOAD_BATCH_SIZE
-        st.session_state.quiz_start_index = 0
-        st.success(f"Logged in as: {user_id}! (Mock Access)")
-        load_and_update_vocabulary_data() 
-    else:
-        st.error("Invalid credentials.")
+    try:
+        if action == "Sign Up":
+            # Sign up the user (Firebase will handle email link verification mock)
+            user_id = sign_up(email, password)
+            st.session_state.current_user_email = email
+            st.success("✅ Registration successful. Please login.")
+            
+        elif action == "Sign In":
+            # Sign in the user
+            user_id = sign_in(email, password)
+            st.session_state.current_user_email = email
+            st.session_state.is_auth = True
+            st.session_state.words_displayed = LOAD_BATCH_SIZE
+            st.session_state.quiz_start_index = 0
+            
+            display_email = "Admin" if email == ADMIN_EMAIL else email
+            st.success(f"Logged in as: {display_email}! Access granted.")
+            load_and_update_vocabulary_data() 
 
-
-# 🟢 REMOVED: check_and_start_auto_extraction is no longer needed.
-
-def load_more_words():
-    """Increments the displayed word count and triggers extraction if needed."""
-    
-    new_display_count = st.session_state.words_displayed + LOAD_BATCH_SIZE
-    
-    # Check if we need to extract new words to meet the display requirement
-    if new_display_count > len(st.session_state.vocab_data):
-        
-        words_to_extract = new_display_count - len(st.session_state.vocab_data)
-        
-        # We only extract up to the LOAD_BATCH_SIZE in one go
-        extraction_limit = min(words_to_extract, LOAD_BATCH_SIZE)
-        
-        st.info(f"Manually extracting {extraction_limit} new words...")
-        
-        existing_words = [d['word'] for d in st.session_state.vocab_data]
-        new_words = real_llm_vocabulary_extraction(extraction_limit, existing_words)
-        
-        if new_words:
-            st.session_state.vocab_data.extend(new_words)
-            save_vocabulary_to_file(st.session_state.vocab_data)
-            st.success(f"✅ Added {len(new_words)} words. Total: {len(st.session_state.vocab_data)}")
+    except Exception as e:
+        error_msg = str(e)
+        if "EMAIL_EXISTS" in error_msg:
+            st.error("This email is already registered. Please sign in.")
+        elif "INVALID_LOGIN_CREDENTIALS" in error_msg or "USER_NOT_FOUND" in error_msg:
+            st.error("Invalid email or password.")
         else:
-            # If extraction fails, we still try to increase the display count to show existing words
-            pass 
+            st.error(f"Authentication failed: {error_msg}")
 
-    st.session_state.words_displayed = new_display_count
-    st.rerun()
+def check_firebase_auth_state():
+    """
+    Checks if a user is currently logged in via Firebase.
+    """
+    if is_user_logged_in():
+        user_email = st.session_state.current_user_email or get_user_id()
+        st.session_state.current_user_email = user_email
+        st.session_state.is_auth = True
+        return True
+    
+    if st.session_state.is_auth:
+        st.session_state.is_auth = False # Force log out if token expired/invalid
+    
+    return False
 
 # ----------------------------------------------------------------------
-# 4. MAIN FEATURES: UI COMPONENTS
+# 5. UI COMPONENTS
 # ----------------------------------------------------------------------
 
 def display_vocabulary_ui():
@@ -289,25 +273,20 @@ def display_vocabulary_ui():
     # Use a scrollable container for the words being shown
     with st.container(height=500, border=True):
         for i, data in enumerate(st.session_state.vocab_data[:words_to_show]):
-            # 🟢 CHANGE: Calculate the word number based on the index (i)
             word_number = i + 1 
-            
             word = data.get('word', 'N/A').upper()
             pronunciation = data.get('pronunciation', 'N/A')
             definition = data.get('definition', 'N/A')
             tip = data.get('tip', 'N/A')
             usage = data.get('usage', 'N/A')
-            audio_url = data.get('audio_url') # 🟢 READ AUDIO URL DIRECTLY FROM DATABASE
+            audio_url = data.get('audio_url')
             
-            
-            # 🟢 CHANGE: Prepend the word number to the expander title
             expander_title = f"**{word_number}.** {word} - {pronunciation}"
             
             with st.expander(expander_title):
                 
                 # --- AUDIO PLAYBACK ---
                 if audio_url:
-                    # Streamlit can play public audio URLs directly
                     audio_html = f"""
                         <audio controls style="width: 100%;" src="{audio_url}">
                             Your browser does not support the audio element.
@@ -315,12 +294,10 @@ def display_vocabulary_ui():
                     """
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
-                    # This message should only appear for old words that failed the URL update
                     st.warning("Audio URL is missing for this word.")
                 # -----------------------
 
                 st.markdown(f"**Definition:** {definition.capitalize()}")
-                # 🟢 MEMORY TIP DISPLAY: This is already present and working.
                 st.markdown(f"**Memory Tip:** *{tip}*") 
                 st.markdown(f"**Usage:** *'{usage}'*")
 
@@ -336,23 +313,18 @@ def start_new_quiz():
     """
     QUIZ_SIZE = 5 
     
-    # 🟢 FIX: Use the stored quiz_start_index to define the slice of words
     start = st.session_state.quiz_start_index
     end = start + QUIZ_SIZE
     
-    # 🟢 FIX: Limit the pool of words to the sequence of words to be tested
     words_pool = st.session_state.vocab_data[start:end]
     
     if len(words_pool) < QUIZ_SIZE:
         st.error(f"Cannot start quiz. Need {QUIZ_SIZE} words starting from position {start + 1}, but only found {len(words_pool)}.")
         return
 
-    # No need to randomly sample since we are taking the first 5 in the block
     quiz_words = words_pool 
     
-    # Store quiz details for accurate scoring later
     quiz_details = []
-    # Use the entire vocabulary list for decoy definitions
     all_definitions = [d['definition'].capitalize() for d in st.session_state.vocab_data]
     
     for question_data in quiz_words:
@@ -366,8 +338,6 @@ def start_new_quiz():
         options = [correct_answer] + decoys
         random.shuffle(options)
         
-        # 🟢 Capture the original index (position + 1) for the quiz display
-        # The index is simply the start index + the current position in the quiz block
         original_word_index = st.session_state.vocab_data.index(question_data) + 1
         
         quiz_details.append({
@@ -376,20 +346,18 @@ def start_new_quiz():
             "tip": question_data['tip'],
             "usage": question_data['usage'],
             "options": options,
-            "index": original_word_index  # Store the number for numbering
+            "index": original_word_index
         })
         
     st.session_state.quiz_details = quiz_details
     st.session_state.quiz_active = True
-    st.session_state.quiz_results = None # Store results after submission
+    st.session_state.quiz_results = None 
 
-# Helper function to advance the quiz index
 def advance_quiz_index():
     QUIZ_SIZE = 5
     st.session_state.quiz_start_index += QUIZ_SIZE
-    st.session_state.quiz_active = False # Will reset UI and show new button
+    st.session_state.quiz_active = False 
 
-# 🟢 QUIZ CHANGE: Function now processes all questions at once
 def generate_quiz_ui():
     """Renders the Quiz Section feature."""
     st.header("📝 Vocabulary Quiz", divider="green")
@@ -401,7 +369,6 @@ def generate_quiz_ui():
         st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}")
         return
 
-    # Calculate current quiz block range
     start_word_num = st.session_state.quiz_start_index + 1
     end_word_num = min(st.session_state.quiz_start_index + QUIZ_SIZE, total_words)
     
@@ -410,7 +377,7 @@ def generate_quiz_ui():
         
         if start_word_num > total_words:
             st.info("You have completed all available quiz blocks!")
-            st.session_state.quiz_start_index = 0 # Reset for user to start over
+            st.session_state.quiz_start_index = 0
             start_word_num = 1
             end_word_num = min(QUIZ_SIZE, total_words)
             
@@ -435,10 +402,8 @@ def generate_quiz_ui():
         else:
             st.warning(f"Quiz Complete! Final Score: **{score}** out of **{total}** (Accuracy: {accuracy}%)")
             
-        # Display feedback for each question
         st.subheader("Review Your Answers")
         for i, result in enumerate(st.session_state.quiz_results['feedback']):
-            # 🟢 CHANGE: Use original index number from the Vocabulary list
             st.markdown(f"#### **Word #{result['index']}: {result['word']}**") 
             st.markdown(f"**Your Answer:** {result['user_choice']}")
             st.markdown(f"**Correct Answer:** {result['correct_answer']}")
@@ -449,9 +414,8 @@ def generate_quiz_ui():
             
             st.markdown("---")
             
-        st.session_state.quiz_results = None # Clear results
+        st.session_state.quiz_results = None 
         
-        # Button to move to the next sequential block
         next_start_index = st.session_state.quiz_start_index + QUIZ_SIZE
         if next_start_index < total_words:
             st.button(f"Start Next Quiz Block (Words #{next_start_index + 1} - #{min(next_start_index + QUIZ_SIZE, total_words)})", on_click=advance_quiz_index, type="secondary")
@@ -466,19 +430,15 @@ def generate_quiz_ui():
     
     quiz_details = st.session_state.quiz_details
     
-    # 🟢 QUIZ CHANGE: Show all questions in one form
     with st.form(key="full_quiz_form"):
         st.subheader(f"Answer the following {QUIZ_SIZE} questions:")
         st.caption(f"Testing words **{start_word_num}** to **{end_word_num}**.")
         
-        # Collect user responses in a list
         st.session_state.user_responses = [] 
         
         for i, q in enumerate(quiz_details):
-            # 🟢 CHANGE: Use the word's original index number for display
             st.markdown(f"#### **Word #{q['index']}. Define: {q['word'].upper()}**") 
             
-            # Key must be unique per question
             user_choice = st.radio(
                 "Select the correct definition:", 
                 q['options'], 
@@ -486,7 +446,6 @@ def generate_quiz_ui():
                 index=None,
                 label_visibility="collapsed"
             )
-            # Store the selected answer (or None) for submission processing
             st.session_state.user_responses.append(user_choice)
 
         submitted = st.form_submit_button("Submit All Answers")
@@ -495,13 +454,10 @@ def generate_quiz_ui():
             final_score = 0
             feedback_list = []
             
-            # Check if all fields were answered (basic validation)
             if any(response is None for response in st.session_state.user_responses):
                 st.error("Please answer ALL questions before submitting.")
-                # We return here to keep the form active until all are answered
                 return
 
-            # Process responses
             for i, response in enumerate(st.session_state.user_responses):
                 q = quiz_details[i]
                 is_correct = (response == q['correct_answer'])
@@ -516,17 +472,15 @@ def generate_quiz_ui():
                     "is_correct": is_correct,
                     "tip": q['tip'],
                     "usage": q['usage'],
-                    "index": q['index'] # Pass the original index to the results
+                    "index": q['index']
                 })
             
-            # Store final results
             st.session_state.quiz_results = {
                 "score": final_score,
                 "total": QUIZ_SIZE,
                 "accuracy": round((final_score / QUIZ_SIZE) * 100, 1),
                 "feedback": feedback_list
             }
-            # Clear intermediate responses
             del st.session_state.user_responses
             st.rerun()
 
@@ -536,19 +490,38 @@ def admin_extraction_ui():
     # 🟢 CHANGE: Removed "AI Extraction & Data Management" title
     st.header("💡 Data Management", divider="orange") 
     
+    is_admin = st.session_state.current_user_email == ADMIN_EMAIL
+    
+    if not is_admin:
+        st.warning("You must be logged in as the Admin to use this tool.")
+        return
+
     st.markdown(f"""
     **Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).
     
-    The application automatically extracts new words upon startup until it reaches {AUTO_EXTRACT_TARGET_SIZE} words.
+    The application will continue to build the vocabulary list automatically until it reaches {AUTO_EXTRACT_TARGET_SIZE} words.
     """)
     
     st.markdown("---")
     
-    # 🔴 Removed Manual Extraction Button (enforcing auto-extraction)
-    st.info("Word extraction is now automatic upon app startup until the target is met.")
+    # --- Manual Extraction Override (Admin Only) ---
+    if st.button("Force Extract 5 New Words", type="secondary"):
+        st.info("Manually extracting 5 new words...")
+        
+        existing_words = [d['word'] for d in st.session_state.vocab_data]
+        new_batch = real_llm_vocabulary_extraction(5, existing_words)
+        
+        if new_batch:
+            st.session_state.vocab_data.extend(new_batch)
+            save_vocabulary_to_file(st.session_state.vocab_data)
+            st.success(f"✅ Added {len(new_batch)} words. Total: {len(st.session_state.vocab_data)}")
+            st.session_state.words_displayed = len(st.session_state.vocab_data) 
+            st.rerun()
+        else:
+            st.error("Failed to generate new words. Check API key and logs.")
 
 # ----------------------------------------------------------------------
-# 5. STREAMLIT APPLICATION STRUCTURE
+# 6. STREAMLIT APPLICATION STRUCTURE
 # ----------------------------------------------------------------------
 
 def main():
@@ -562,42 +535,57 @@ def main():
         
         if not st.session_state.is_auth:
             
-            st.markdown("##### Admin/User Login")
+            st.markdown("##### New User Signup / Existing User Login")
             
-            user_input = st.text_input("📧 Email", key="user_email_input", value=ADMIN_EMAIL)
-            password_input = st.text_input("🔑 Password", type="password", key="password_input", value=ADMIN_PASSWORD)
+            # 🟢 NOTE: Admin login uses the specified email/password
+            user_email = st.text_input("📧 Email", key="user_email_input")
+            password = st.text_input("🔑 Password", type="password", key="password_input")
             
-            st.button("Login", on_click=handle_login, args=(user_input, password_input), type="primary")
+            col1, col2 = st.columns(2)
             
-            # 🟢 MOCK EXPLANATION FOR SIGN-UP LIMITATION
+            with col1:
+                if st.button("Sign In", key="sign_in_btn", type="primary"):
+                    handle_auth("Sign In", user_email, password)
+            with col2:
+                if st.button("Sign Up", key="sign_up_btn"):
+                    handle_auth("Sign Up", user_email, password)
+            
             st.markdown("---")
             st.markdown("""
-            **Note on Signup:** Due to security restrictions on Streamlit Cloud, the required 6-digit email verification code system is not possible without a separate backend service.
+            **Admin Login:** `rot.jamshaid@gmail.com` / `Jamshaid,1981`
             
-            For new users, please use **any email** and a password of **4 characters or more** to simulate signup/login.
+            **Note on Verification:** This app uses Firebase for real authentication. The 6-digit email verification is **not fully visible** here, but Firebase enforces strong email/password security.
             """)
             
         else:
-            st.success(f"Logged in as: **{st.session_state.current_user_id}**")
-            if st.button("Log Out"):
+            display_name = "Admin" if st.session_state.current_user_email == ADMIN_EMAIL else st.session_state.current_user_email
+            st.success(f"Logged in as: **{display_name}**")
+            
+            if st.button("Log Out", on_click=sign_out):
                 st.session_state.is_auth = False
-                st.session_state.current_user_id = None
+                st.session_state.current_user_email = None
                 st.session_state.quiz_active = False
-                st.session_state.words_displayed = LOAD_BATCH_SIZE # Reset display
+                st.session_state.words_displayed = LOAD_BATCH_SIZE
                 st.rerun()
                 
     # --- Main Content ---
-    # 🟢 CHANGE: Load data immediately (FAST)
+    
+    # 🟢 FIX 1: Remove the crashing function call entirely
+    # check_and_start_auto_extraction() is now fully removed.
+    
+    # 🟢 FIX 2: Check Firebase state first (if environment supports it)
+    if not st.session_state.is_auth and is_user_logged_in():
+         handle_auth("Sign In", st.session_state.current_user_email, "") # Auto re-authenticate
+
     load_and_update_vocabulary_data() 
     
     if not st.session_state.is_auth:
         st.info("Please log in using the sidebar to access the Vocabulary Builder.")
     else:
-        # 🟢 CHANGE: Trigger the background extraction check (SLOW)
-        # This runs AFTER the UI has loaded the database content.
-        # It is intentionally placed here to be non-blocking.
-        check_and_start_auto_extraction()
-            
+        # 🟢 FINAL CLEANUP: Ensure background processing happens (if necessary)
+        if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
+             st.info("The app is currently building the vocabulary list...")
+
         # Use tabs for the main features
         tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])
         

@@ -8,6 +8,16 @@ from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
+# --- New Imports for gTTS and Audio Processing ---
+try:
+    from gtts import gTTS
+    from pydub import AudioSegment
+    import io
+except ImportError:
+    st.error("ERROR: The 'gtts' and 'pydub' libraries are required.")
+    st.error("Please ensure they are in requirements.txt and installed.")
+    st.stop()
+# ----------------------------------------------------
 
 # --- AI & STRUCTURED OUTPUT LIBRARIES ---
 try:
@@ -22,7 +32,7 @@ except ImportError:
 # *** LOCAL EXECUTION SETUP & FILE PATHS ***
 # ======================================================================
 
-# Check for API Key (Works for local environment variables and Streamlit Secrets)
+# Check for API Key (Still required for text extraction)
 if "GEMINI_API_KEY" not in os.environ and not ("__initial_auth_token__" in globals() and __initial_auth_token__):
     st.error("🔴 GEMINI_API_KEY is missing!")
     st.warning("""
@@ -47,15 +57,18 @@ JSON_FILE_PATH = "vocab_data.json"
 REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
 
-# Pydantic Schema for Structured AI Output - ADDED PRONUNCIATION
+# Pydantic Schema for Structured AI Output - UPDATED to store audio base64
 class SatWord(BaseModel):
     """Defines the exact structure for the AI-generated vocabulary word."""
     word: str = Field(description="The SAT-level word.")
-    pronunciation: str = Field(description="Phonetic transcription (e.g., /ɪˈfɛmərəl/).")
+    # Asking for a more TTS-friendly pronunciation format
+    pronunciation: str = Field(description="Simple, hyphenated phonetic pronunciation (e.g., eh-FEM-er-al).")
     definition: str = Field(description="The concise dictionary definition.")
     tip: str = Field(description="A short, catchy mnemonic memory tip.")
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
+    # 🟢 NEW FIELD: To store the audio base64 string permanently
+    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded MP3 audio data for pronunciation.")
 
 # ----------------------------------------------------------------------
 # 2. DATA PERSISTENCE & STATE MANAGEMENT
@@ -67,8 +80,6 @@ if 'is_auth' not in st.session_state: st.session_state.is_auth = False
 if 'vocab_data' not in st.session_state: st.session_state.vocab_data = []
 if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
-if 'audio_data_cache' not in st.session_state: st.session_state.audio_data_cache = {} # Cache for base64 audio data
-
 
 def load_vocabulary_from_file():
     """Loads vocabulary data from the local JSON file."""
@@ -91,75 +102,46 @@ def save_vocabulary_to_file(data: List[Dict]):
         st.error(f"Error saving data to {JSON_FILE_PATH}: {e}")
 
 # ----------------------------------------------------------------------
-# 3. AI EXTRACTION & TTS FUNCTIONS
+# 3. AI EXTRACTION & gTTS FUNCTIONS
 # ----------------------------------------------------------------------
 
-def call_tts_api(text: str, max_retries: int = 3) -> Optional[str]:
+def generate_gtts_audio(text: str) -> Optional[str]:
     """
-    Calls the Gemini TTS API to get base64 encoded PCM audio data with retries.
-    Caches results to avoid repeated API calls and implements exponential backoff.
+    Generates audio using gTTS, converts it to base64, and returns the string.
+    This replaces the unreliable Gemini TTS API call.
     """
-    if text in st.session_state.audio_data_cache:
-        return st.session_state.audio_data_cache[text]
+    try:
+        # 1. Create gTTS object and save to an in-memory byte buffer
+        tts = gTTS(text=text, lang='en')
+        mp3_fp = io.BytesIO()
+        tts.write_to_fp(mp3_fp)
+        mp3_fp.seek(0)
+        
+        # 2. Read the MP3 audio bytes
+        audio_bytes = mp3_fp.read()
+        
+        # 3. Encode to base64
+        base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+        return base64_audio
 
-    # Only show the info message when running locally
-    if 'streamlit run' in sys.argv[0]:
-        st.info(f"Attempting to generate pronunciation audio for: **{text}**")
-    
-    for attempt in range(max_retries):
-        try:
-            # Use a cheerful voice for a positive learning experience (Zephyr)
-            payload = {
-                "contents": [{
-                    "parts": [{ "text": f"Say clearly and slowly: {text}" }]
-                }],
-                "generationConfig": {
-                    "responseModalities": ["AUDIO"],
-                    "speechConfig": {
-                        "voiceConfig": {
-                            "prebuiltVoiceConfig": { "voiceName": "Zephyr" }
-                        }
-                    }
-                }
-            }
-            
-            # NOTE: Using a separate client here for the TTS model 
-            tts_client = genai.Client()
-            response = tts_client.models.generate_content(
-                model="gemini-2.5-flash-preview-tts",
-                contents=payload["contents"],
-                config=payload["generationConfig"]
-            )
-
-            part = response.candidates[0].content.parts[0]
-            audio_data = part.inlineData.data
-            
-            st.session_state.audio_data_cache[text] = audio_data
-            return audio_data
-
-        except Exception as e:
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt  # Exponential backoff (1s, 2s)
-                time.sleep(wait_time)
-            else:
-                # st.error(f"🔴 TTS API Failed permanently for '{text}' after {max_retries} attempts.")
-                return None
+    except Exception as e:
+        # Logging the error locally for debugging, but failing silently in the app UI
+        # st.error(f"gTTS Audio Generation Failed for '{text}': {e}")
+        return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
-    Calls the Gemini API to generate structured vocabulary data not already in the list.
+    1. Calls the Gemini API to generate structured vocabulary data.
+    2. Calls the gTTS library for each new word and stores the audio data.
     """
     
-    # 1. Define the words to exclude in the prompt
-    exclusion_list = ", ".join(existing_words) if existing_words else "none"
-
-    # 2. Define the prompt
+    # --- Step 1: Generate Text Data (Remains the same using Gemini) ---
     prompt = f"""
     Generate {num_words} unique, extremely high-level SAT vocabulary words.
-    The words must NOT be any of the following: {exclusion_list}.
+    The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}.
     For each word, provide:
     1. The word itself.
-    2. The standard phonetic pronunciation.
+    2. A simple, hyphenated phonetic pronunciation (like a dictionary spelling, e.g., 'EH-fem-er-al').
     3. A concise dictionary definition.
     4. A short, creative, and memorable mnemonic memory tip.
     5. A professional sample usage sentence.
@@ -167,44 +149,48 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     Return the result as a JSON array where each object strictly conforms to the provided schema.
     """
 
-    # 3. Define the JSON schema for a LIST of SatWord objects
-    list_schema = {
-        "type": "array",
-        "items": SatWord.model_json_schema() # Get the schema for a single item
-    }
+    list_schema = {"type": "array", "items": SatWord.model_json_schema()}
+    config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
 
-    # 4. Configure structured output
-    config = types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_json_schema=list_schema, 
-    )
-
-    with st.spinner(f"🤖 Calling Gemini AI to generate {num_words} new SAT words..."):
+    with st.spinner(f"🤖 Calling Gemini AI for text generation of {num_words} words..."):
+        # ... (Text extraction logic remains the same)
         try:
             response = gemini_client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config=config
+                model="gemini-2.5-flash", contents=prompt, config=config
             )
-            
-            # 5. Parse the JSON response
             new_data_list = json.loads(response.text)
-            
-            # 6. Validate the structured data
-            validated_words = []
-            for item in new_data_list:
-                try:
-                    word_obj = SatWord(**item)
-                    validated_words.append(word_obj.model_dump())
-                except ValidationError as e:
-                    st.warning(f"AI generated invalid data for a word (validation error: {e}). Skipping item.")
-                    continue
-            
-            return validated_words
-
+            validated_words = [SatWord(**item).model_dump() for item in new_data_list if 'word' in item]
+            if not validated_words:
+                st.error("AI returned structured data but validation failed for all items.")
+                return []
         except Exception as e:
-            st.error(f"🔴 Gemini API Extraction Failed: {e}")
+            st.error(f"🔴 Gemini Text Extraction Failed: {e}")
             return []
+
+
+    # --- Step 2: Generate and Attach Audio Data using gTTS ---
+    
+    words_with_audio = []
+    
+    with st.spinner(f"🔊 Generating gTTS audio for {len(validated_words)} words..."):
+        tts_progress = st.progress(0, text="Generating Audio...")
+        
+        for i, word_data in enumerate(validated_words):
+            word = word_data['word']
+            
+            # 🟢 NEW: Use the local Python library for audio generation
+            audio_base64 = generate_gtts_audio(word)
+            
+            # Attach the base64 string directly to the word's data structure
+            word_data['audio_base64'] = audio_base64
+            words_with_audio.append(word_data)
+
+            # Update progress bar
+            tts_progress.progress((i + 1) / len(validated_words), text=f"Generated audio for {word}...")
+            
+        tts_progress.empty() # Clear progress bar once finished
+
+    return words_with_audio
 
 def load_or_extract_initial_vocabulary(required_count: int = LOAD_BATCH_SIZE):
     """
@@ -240,11 +226,8 @@ def load_or_extract_initial_vocabulary(required_count: int = LOAD_BATCH_SIZE):
 # --- Login Handler (Defined before main() to prevent NameError) ---
 def handle_login(user_id, password):
     """Mocks email/password verification."""
-    # Since we cannot use real Firebase Auth, this mocks a successful login
-    # if a simple validation is met (e.g., non-empty fields).
     
     if user_id and password:
-        # A simple mock success criteria
         st.session_state.current_user_id = user_id
         st.session_state.is_auth = True
         st.session_state.words_displayed = LOAD_BATCH_SIZE # Reset display count on login
@@ -287,83 +270,6 @@ def load_more_words():
 # 4. MAIN FEATURES: UI COMPONENTS
 # ----------------------------------------------------------------------
 
-# --- JAVASCRIPT FOR PCM TO WAV CONVERSION (Required for TTS) ---
-JS_PCM_TO_WAV = """
-<script>
-    function base64ToArrayBuffer(base64) {
-        var binaryString = atob(base64);
-        var len = binaryString.length;
-        var bytes = new Int8Array(len);
-        for (var i = 0; i < len; i++) {
-            bytes[i] = binaryString.charCodeAt(i);
-        }
-        return bytes.buffer;
-    }
-
-    function pcmToWav(pcm16, sampleRate) {
-        var buffer = new ArrayBuffer(44 + pcm16.length * 2);
-        var view = new DataView(buffer);
-        var pcmLength = pcm16.length * 2;
-        var channels = 1;
-        var bitsPerSample = 16;
-        var byteRate = sampleRate * channels * (bitsPerSample / 8);
-
-        // RIFF chunk descriptor
-        writeString(view, 0, 'RIFF');
-        view.setUint32(4, 36 + pcmLength, true);
-        writeString(view, 8, 'WAVE');
-
-        // FMT chunk
-        writeString(view, 12, 'fmt ');
-        view.setUint32(16, 16, true);
-        view.setUint16(20, 1, true); // Linear PCM
-        view.setUint16(22, channels, true);
-        view.setUint32(24, sampleRate, true);
-        view.setUint32(28, byteRate, true);
-        view.setUint16(32, channels * (bitsPerSample / 8), true);
-        view.setUint16(34, bitsPerSample, true);
-
-        // Data chunk
-        writeString(view, 36, 'data');
-        view.setUint32(40, pcmLength, true);
-
-        // Write PCM data
-        var offset = 44;
-        for (var i = 0; i < pcm16.length; i++, offset += 2) {
-            view.setInt16(offset, pcm16[i], true);
-        }
-
-        return new Blob([view], { type: 'audio/wav' });
-    }
-
-    function writeString(view, offset, string) {
-        for (var i = 0; i < string.length; i++) {
-            view.setUint8(offset + i, string.charCodeAt(i));
-        }
-    }
-    
-    // --- MAIN PLAY FUNCTION ---
-    window.playAudio = function(base64Data, sampleRate = 24000) {
-        try {
-            var pcmData = base64ToArrayBuffer(base64Data);
-            // The API returns 16-bit signed PCM, which we need to convert to an Int16Array
-            var pcm16 = new Int16Array(pcmData.slice(0)); 
-            var wavBlob = pcmToWav(pcm16, sampleRate);
-            
-            var audioUrl = URL.createObjectURL(wavBlob);
-            var audio = new Audio(audioUrl);
-            audio.play();
-
-        } catch(e) {
-            console.error("Error playing audio:", e);
-            alert("Could not play audio. Check console for details.");
-        }
-    }
-</script>
-"""
-st.components.v1.html(JS_PCM_TO_WAV, height=0)
-
-
 def display_vocabulary_ui():
     """Renders the Vocabulary Display feature with Load More functionality."""
     st.header("📚 Vocabulary Display", divider="blue")
@@ -385,24 +291,24 @@ def display_vocabulary_ui():
             definition = data.get('definition', 'N/A')
             tip = data.get('tip', 'N/A')
             usage = data.get('usage', 'N/A')
+            audio_base64 = data.get('audio_base64') # 🟢 READ AUDIO DIRECTLY FROM DATABASE
             
             
             with st.expander(f"**{word}** - {pronunciation}"):
                 
-                # --- TTS PLAY BUTTON ---
-                audio_base64 = call_tts_api(word)
+                # --- AUDIO PLAYBACK ---
                 if audio_base64:
-                    # Create the JavaScript call string
-                    js_call = f'window.playAudio("{audio_base64}");'
-                    
-                    # Embed the button and call the JS function on click
-                    st.markdown(f"""
-                        <button 
-                            onclick='{js_call}' 
-                            style='background-color: #4CAF50; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer; margin-bottom: 10px;'>
-                            🔊 Listen
-                        </button>
-                    """, unsafe_allow_html=True)
+                    # Streamlit can play base64-encoded audio directly using HTML audio tag
+                    # We specify the MIME type as MP3 since gTTS generates MP3
+                    audio_html = f"""
+                        <audio controls style="width: 100%;">
+                            <source src="data:audio/mp3;base64,{audio_base64}" type="audio/mp3">
+                            Your browser does not support the audio element.
+                        </audio>
+                    """
+                    st.markdown(audio_html, unsafe_allow_html=True)
+                else:
+                    st.warning("Audio not available for this word.")
                 # -----------------------
 
                 st.markdown(f"**Definition:** {definition.capitalize()}")
@@ -505,31 +411,30 @@ def admin_extraction_ui():
     st.markdown(f"""
     **Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).
     
-    The application uses the Gemini AI to generate new vocabulary and saves it to **`{JSON_FILE_PATH}`**.
+    The application uses the Gemini AI (for text) and **gTTS (for audio)** to generate and save data to **`{JSON_FILE_PATH}`**.
     """)
     
     # --- Manual TTS Test Tool ---
     st.subheader("🔊 Audio Pronunciation Test")
+    st.markdown("This uses the robust **gTTS** system. Test here to confirm audio libraries are working.")
     test_word = st.text_input("Enter word to test audio:", value="ephemeral")
     
     if st.button("Test Pronunciation"):
         if test_word:
             with st.spinner(f"Testing audio for '{test_word}'..."):
-                test_audio = call_tts_api(test_word, max_retries=3)
+                test_audio = generate_gtts_audio(test_word)
             
             if test_audio:
-                # Use the embedded JS player for playback
-                js_call = f'window.playAudio("{test_audio}");'
-                st.markdown(f"""
-                    <button 
-                        onclick='{js_call}' 
-                        style='background-color: #007BFF; color: white; padding: 5px 10px; border: none; border-radius: 4px; cursor: pointer;'>
-                        ▶️ Play "{test_word}"
-                    </button>
-                """, unsafe_allow_html=True)
-                st.success(f"Audio stream successfully generated for '{test_word}'. If you don't hear anything, check your browser permissions.")
+                audio_html = f"""
+                    <audio controls autoplay style="width: 100%;">
+                        <source src="data:audio/mp3;base64,{test_audio}" type="audio/mp3">
+                        Your browser does not support the audio element.
+                    </audio>
+                """
+                st.markdown(audio_html, unsafe_allow_html=True)
+                st.success(f"Audio stream successfully generated for '{test_word}'.")
             else:
-                st.error(f"Failed to generate audio stream for '{test_word}'. The TTS server may be overloaded. Try again in a minute.")
+                st.error(f"Failed to generate audio stream for '{test_word}'. Check the terminal for gTTS errors.")
         else:
             st.warning("Please enter a word to test.")
 

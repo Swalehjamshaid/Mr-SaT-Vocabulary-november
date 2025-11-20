@@ -4,280 +4,669 @@ import random
 import sys
 import os
 import base64
-import urllib.parse
+import urllib.parse 
 from typing import List, Dict, Optional
 import streamlit as st
+from pydantic import BaseModel, Field, ValidationError
+from pydantic import json_schema 
 
-# --- Pronunciation Libraries (Python-based) ---
-try:
-    import pronouncing          # Great for American English phonetic spelling
-except ImportError:
-    st.error("Installing 'pronouncing' is recommended: pip install pronouncing")
-    pronouncing = None
-
-try:
-    import eng_to_ipa as ipa    # Fallback: converts English to IPA
-except ImportError:
-    st.error("Installing 'eng-to-ipa' as fallback: pip install eng-to-ipa")
-    ipa = None
-
-# --- Gemini API ---
+# --- GEMS API (The library that handles TTS audio generation) ---
 try:
     from google import genai
     from google.genai import types
 except ImportError:
-    st.error("ERROR: google-generativeai required: pip install google-generativeai")
+    st.error("ERROR: The 'google-genai' and 'pydantic' libraries are required.")
+    st.error("Please run: pip install google-genai pydantic")
     st.stop()
 
-from pydantic import BaseModel, Field
 
 # ======================================================================
-# *** CONFIG & API SETUP ***
+# *** LOCAL EXECUTION SETUP & FILE PATHS ***
 # ======================================================================
-if "GEMINI_API_KEY" not in os.environ:
-    st.error("GEMINI_API_KEY is missing! Set it in secrets or environment.")
+
+# Check for API Key (Gemini)
+if "GEMINI_API_KEY" in os.environ:
+    # Use the API key provided in the secrets file
+    api_key = os.environ["GEMINI_API_KEY"]
+else:
+    st.error("🔴 GEMINI_API_KEY is missing! Please set it in your secrets.")
     st.stop()
 
-gemini_client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+# Initialize Gemini Client
+try:
+    # We still need the Gemini client for text extraction
+    gemini_client = genai.Client()
+except Exception as e:
+    st.error(f"🔴 Failed to initialize Gemini Client: {e}")
+    st.stop()
 
-JSON_FILE_PATH = "vocab_data.json"
+# --- App State and Constants ---
+# Use a local JSON file for persistent storage
+JSON_FILE_PATH = "vocab_data.json" 
 REQUIRED_WORD_COUNT = 2000
-LOAD_BATCH_SIZE = 10
-AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT
-QUIZ_SIZE = 5
-MANUAL_EXTRACT_BATCH = 50
+LOAD_BATCH_SIZE = 10 
+# The target for automatic extraction is now the full 2000 words
+AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT 
+QUIZ_SIZE = 5 
 
-ADMIN_EMAIL = "roy.jamshaid@gmail.com"
-ADMIN_PASSWORD = "Jamshaid,1981"
+# Admin Configuration (Mock Login)
+ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
+ADMIN_PASSWORD = "Jamshaid,1981" 
+# Manual extraction batch size set to 50 for the Admin button
+MANUAL_EXTRACT_BATCH = 50 
 
-# ======================================================================
-# Pydantic Model
-# ======================================================================
+
+# Pydantic Schema for Vocabulary Word
 class SatWord(BaseModel):
-    word: str
-    pronunciation: str = Field(description="Hyphenated phonetic: e.g., uh-BAWN-duh")
-    definition: str
-    tip: str
-    usage: str
-    sat_level: str = "High"
-    audio_base64: Optional[str] = None
+    word: str = Field(description="The SAT-level word.")
+    pronunciation: str = Field(description="Simple, hyphenated phonetic pronunciation (e.g., eh-FEM-er-al).")
+    definition: str = Field(description="The concise dictionary definition.")
+    tip: str = Field(description="A short, catchy mnemonic memory tip.")
+    usage: str = Field(description="A professional sample usage sentence.")
+    sat_level: str = Field(default="High", description="Should always be 'High'.")
+    # The audio field now stores WAV Base64 data from Gemini TTS
+    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
 
-# ======================================================================
-# Pronunciation from Python Libraries (Fast & Local)
-# ======================================================================
-def get_pronunciation(word: str) -> str:
-    """
-    Returns simple hyphenated phonetic pronunciation using local Python libraries.
-    Falls back gracefully.
-    """
-    word_clean = word.strip().lower()
+# ----------------------------------------------------------------------
+# 2. DATA PERSISTENCE & STATE MANAGEMENT (LOCAL FILE)
+# ----------------------------------------------------------------------
 
-    # 1. Try 'pronouncing' library (best quality)
-    if pronouncing and hasattr(pronouncing, 'phones_for_word'):
-        phones = pronouncing.phones_for_word(word_clean)
-        if phones:
-            # Convert ARPAbet to simple spelling (e.g., AH0 B AW1 N D AH0 → uh-BAWN-duh)
-            arpabet = phones[0]
-            simple = pronouncing.stresses(arpabet).replace('0', '').replace('1', '').replace('2', '')
-            mapping = {
-                'AA': 'ah', 'AE': 'a', 'AH': 'uh', 'AO': 'aw', 'AW': 'ow',
-                'AY': 'igh', 'B': 'b', 'CH': 'ch', 'D': 'd', 'DH': 'th',
-                'EH': 'e', 'ER': 'ur', 'EY': 'ay', 'F': 'f', 'G': 'g',
-                'HH': 'h', 'IH': 'i', 'IY': 'ee', 'JH': 'j', 'K': 'k',
-                'L': 'l', 'M': 'm', 'N': 'n', 'NG': 'ng', 'OW': 'oh',
-                'OY': 'oy', 'P': 'p', 'R': 'r', 'S': 's', 'SH': 'sh',
-                'T': 't', 'TH': 'th', 'UH': 'oo', 'UW': 'oo', 'V': 'v',
-                'W': 'w', 'Y': 'y', 'Z': 'z', 'ZH': 'zh'
-            }
-            parts = simple.split()
-            converted = []
-            for p in parts:
-                converted.append(mapping.get(p, p.lower()))
-            result = '-'.join(converted).upper()
-            if result.count('-') > 0:
-                return result
+if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
+if 'is_auth' not in st.session_state: st.session_state.is_auth = False
+if 'vocab_data' not in st.session_state: st.session_state.vocab_data = []
+if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
+if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
+if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
+if 'is_admin' not in st.session_state: st.session_state.is_admin = False
 
-    # 2. Fallback: eng-to-ipa (gives IPA like /ɪˈfɛmərəl/)
-    if ipa:
-        try:
-            ipa_text = ipa.convert(word_clean)
-            if ipa_text != word_clean and ipa_text != "*":  # not failed
-                # Convert common IPA to simple spelling
-                ipa_map = {
-                    'ɪ': 'i', 'iː': 'ee', 'ɛ': 'e', 'æ': 'a', 'ɑː': 'ah', 'ɔː': 'aw',
-                    'ʊ': 'oo', 'uː': 'oo', 'ʌ': 'uh', 'ə': 'uh', 'ɜː': 'ur',
-                    'eɪ': 'ay', 'aɪ': 'igh', 'ɔɪ': 'oy', 'oʊ': 'oh', 'aʊ': 'ow',
-                    'tʃ': 'ch', 'dʒ': 'j', 'θ': 'th', 'ð': 'th', 'ʃ': 'sh', 'ʒ': 'zh',
-                    'ŋ': 'ng'
-                }
-                simple = ipa_text
-                for k, v in ipa_map.items():
-                    simple = simple.replace(k, v)
-                # Clean stress marks and slashes
-                simple = simple.replace('ˈ', '').replace('ˌ', '').replace('/', '').strip()
-                if simple:
-                    return simple.upper()
-        except:
-            pass
+def load_vocabulary_from_file():
+    """Loads vocabulary data from the local JSON file."""
+    if os.path.exists(JSON_FILE_PATH):
+        with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
+            try:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+            except json.JSONDecodeError:
+                return []
+    return []
 
-    # 3. Final fallback: use Forvo-style simple guess
-    return word.upper() + " (pronunciation unavailable)"
+def save_vocabulary_to_file(data: List[Dict]):
+    """Saves the current vocabulary data to the local JSON file."""
+    # NOTE: This saving is unique to the server and not shared among users
+    try:
+        with open(JSON_FILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4)
+    except IOError as e:
+        st.error(f"Error saving data to {JSON_FILE_PATH}: {e}")
 
-# ======================================================================
-# Gemini TTS: PCM → WAV Conversion (unchanged)
-# ======================================================================
-def pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000) -> bytes:
+# ----------------------------------------------------------------------
+# 3. AI EXTRACTION & AUDIO FUNCTIONS
+# ----------------------------------------------------------------------
+
+def pcm_to_wav(pcm_data: bytes, sample_rate: int) -> bytes:
+    """Converts raw PCM audio data into a standard WAV file format using only built-in libraries."""
+    
+    # 1. Prepare header components
     channels = 1
     bits_per_sample = 16
     bytes_per_sample = bits_per_sample // 8
     byte_rate = sample_rate * channels * bytes_per_sample
+    
+    # Total size of the PCM data
     data_size = len(pcm_data)
+    
+    # 2. Construct the header
+    header = b'RIFF'                           # ChunkID
+    header += (36 + data_size).to_bytes(4, 'little') # ChunkSize
+    header += b'WAVE'                           # Format
+    header += b'fmt '                           # Subchunk1ID
+    header += (16).to_bytes(4, 'little')        # Subchunk1Size (16 for PCM)
+    header += (1).to_bytes(2, 'little')         # AudioFormat (1 for PCM)
+    header += channels.to_bytes(2, 'little')    # NumChannels
+    header += sample_rate.to_bytes(4, 'little') # SampleRate
+    header += byte_rate.to_bytes(4, 'little')   # ByteRate
+    header += bytes_per_sample.to_bytes(2, 'little') # BlockAlign
+    header += bits_per_sample.to_bytes(2, 'little')  # BitsPerSample
+    header += b'data'                           # Subchunk2ID
+    header += data_size.to_bytes(4, 'little')   # Subchunk2Size
 
-    header = b'RIFF'
-    header += (36 + data_size).to_bytes(4, 'little')
-    header += b'WAVEfmt '
-    header += (16).to_bytes(4, 'little')
-    header += (1).to_bytes(2, 'little')
-    header += channels.to_bytes(2, 'little')
-    header += sample_rate.to_bytes(4, 'little')
-    header += byte_rate.to_bytes(4, 'little')
-    header += bytes_per_sample.to_bytes(2, 'little')
-    header += bits_per_sample.to_bytes(2, 'little')
-    header += b'data'
-    header += data_size.to_bytes(4, 'little')
     return header + pcm_data
 
-def generate_tts_audio(word: str) -> Optional[str]:
+def generate_tts_audio(text: str) -> Optional[str]:
+    """Generates audio via Gemini TTS and returns Base64 encoded WAV data."""
     try:
-        response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash-preview-tts",
-            contents=[{"parts": [{"text": word}]}],
-            config=types.GenerateContentConfig(
-                response_modalities=["AUDIO"],
-                speech_config={"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}}
-            )
+        # Use a reliable voice (Kore is a clear voice)
+        tts_config = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config={
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}
+            }
         )
+        
+        # NOTE: Use gemini-2.5-flash-preview-tts for TTS
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash-preview-tts", 
+            contents=[{"parts": [{"text": text}]}], 
+            config=tts_config
+        )
+
+        # Extract base64 PCM data and mime type
         audio_part = response.candidates[0].content.parts[0].inlineData
-        pcm_b64 = audio_part.data
-        mime = audio_part.mimeType
-        rate = 24000
-        if 'rate=' in mime:
-            try:
-                rate = int(mime.split('rate=')[1].split(';')[0])
-            except:
-                pass
-        pcm = base64.b64decode(pcm_b64)
-        wav = pcm_to_wav(pcm, rate)
-        return base64.b64encode(wav).decode('utf-8')
+        pcm_base64 = audio_part.data
+        mime_type = audio_part.mimeType # Should be audio/L16;rate=24000
+        
+        if not pcm_base64 or 'audio/L16' not in mime_type:
+            # If API returns an error or empty data
+            return None
+            
+        # Extract sample rate from mime type (default to 24000 if extraction fails)
+        try:
+            # Safely extract rate from the mime type string
+            rate_match = [part for part in mime_type.split(';') if 'rate=' in part]
+            sample_rate = int(rate_match[0].split('=')[1]) if rate_match else 24000
+        except:
+            sample_rate = 24000
+
+        # Decode base64 PCM data
+        pcm_bytes = base64.b64decode(pcm_base64)
+        
+        # Convert raw PCM bytes to WAV format
+        wav_bytes = pcm_to_wav(pcm_bytes, sample_rate)
+        
+        # Encode the final WAV bytes back to base64 for embedding in the HTML audio tag
+        return base64.b64encode(wav_bytes).decode('utf-8')
+
     except Exception as e:
-        print(f"TTS failed for {word}: {e}")
+        # Log the detailed error but return None
+        print(f"TTS Generation failed for word: {text}. Error: {e}")
+        st.error(f"TTS Audio Error: {e}")
         return None
 
-# ======================================================================
-# Main Extraction: Gemini for everything EXCEPT pronunciation
-# ======================================================================
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
-    prompt = f"""
-    Generate {num_words} extremely advanced, rare SAT-level vocabulary words.
-    DO NOT include any of these words: {', '.join(existing_words[:100]) if existing_words else 'none'}.
-
-    For each word, provide:
-    - definition (concise)
-    - tip (short mnemonic)
-    - usage (one natural sentence)
-
-    Return valid JSON array of objects with keys: word, definition, tip, usage
     """
+    1. Calls the Gemini API to generate structured vocabulary data.
+    2. Calls the Gemini TTS model for each word to generate and encode the audio.
+    """
+    
+    # --- Step 1: Generate Text Data (Remains the same using gemini-2.5-flash) ---
+    prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
 
+    list_schema = {"type": "array", "items": SatWord.model_json_schema()}
+    config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
+    
     try:
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(response_mime_type="application/json")
+            model="gemini-2.5-flash", contents=prompt, config=config
         )
-        raw_list = json.loads(response.text)
+        new_data_list = json.loads(response.text)
+        validated_words = [SatWord(**item).model_dump() for item in new_data_list if 'word' in item]
     except Exception as e:
-        st.error(f"Gemini extraction failed: {e}")
+        st.error(f"🔴 Gemini Text Extraction Failed: {e}")
         return []
+        
+    # --- Step 2: Generate and Attach Audio Data (Gemini TTS) ---
+    words_with_audio = []
+    
+    # We use a progress bar for the slow step
+    progress_bar = st.progress(0, text=f"Generating TTS audio for 0 of {len(validated_words)} words...")
+    
+    for i, word_data in enumerate(validated_words):
+        word = word_data['word']
+        
+        # Call the TTS function (now using Gemini TTS)
+        audio_data = generate_tts_audio(word)
+        
+        if audio_data:
+            word_data['audio_base64'] = audio_data
+        else:
+            word_data['audio_base64'] = None # Explicitly set to None if generation fails
+            
+        words_with_audio.append(word_data)
+        
+        # Update progress bar
+        progress = (i + 1) / len(validated_words)
+        progress_bar.progress(progress, text=f"Generating TTS audio for {i + 1} of {len(validated_words)} words...")
+        
+    progress_bar.empty() # Clear progress bar on completion
+    
+    return words_with_audio
 
-    words_with_data = []
-    progress = st.progress(0)
-    for i, item in enumerate(raw_list):
-        word = item.get("word", "").strip()
-        if not word or word in existing_words:
-            continue
+def load_and_update_vocabulary_data():
+    """
+    Loads existing data from local file (FAST) and implements aggressive goal-seeking extraction.
+    This function will try to fill the vocabulary up to AUTO_EXTRACT_TARGET_SIZE (2000 words).
+    """
+    if not st.session_state.is_auth: return
+    
+    st.session_state.vocab_data = load_vocabulary_from_file()
+    word_count = len(st.session_state.vocab_data)
+    
+    if word_count > 0:
+        st.info(f"✅ Loaded {word_count} words from local file.")
+    
+    # --- Aggressive Auto-Extraction Logic (aims for 2000 words in batches of 10) ---
+    if word_count < AUTO_EXTRACT_TARGET_SIZE:
+        words_needed = AUTO_EXTRACT_TARGET_SIZE - word_count
+        
+        # Determine the number of words to extract in this single session run.
+        # We cap it at LOAD_BATCH_SIZE (10) for stability.
+        num_to_extract = min(LOAD_BATCH_SIZE, words_needed)
+        
+        if num_to_extract > 0:
+            st.warning(f"Goal: {AUTO_EXTRACT_TARGET_SIZE} words. Extracting next {num_to_extract} words now...")
+            
+            # Blocking extraction 
+            existing_words = [d['word'] for d in st.session_state.vocab_data]
+            new_words = real_llm_vocabulary_extraction(num_to_extract, existing_words)
+            
+            if new_words:
+                st.session_state.vocab_data.extend(new_words)
+                save_vocabulary_to_file(st.session_state.vocab_data)
+                st.success(f"✅ Added {len(new_words)} words. Current total: {len(st.session_state.vocab_data)}.")
+                # CRITICAL: Rerun to immediately check if the goal is met or extract the next batch
+                st.rerun() 
+            else:
+                st.error("🔴 Failed to generate new words. Check API key and logs.")
+    
+    # This block handles the very first load when word_count is 0 
+    elif word_count < LOAD_BATCH_SIZE:
+        st.warning(f"Need {LOAD_BATCH_SIZE} words for initial display. Triggering extraction...")
+        # Blocking extraction for initial display 
+        existing_words = [d['word'] for d in st.session_state.vocab_data]
+        new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE, existing_words)
+        
+        if new_words:
+            st.session_state.vocab_data.extend(new_words)
+            save_vocabulary_to_file(st.session_state.vocab_data)
+            st.success(f"✅ Initial {len(new_words)} words generated and saved.")
+            st.rerun()
 
-        # Local pronunciation (fast!)
-        pron = get_pronunciation(word)
 
-        # Generate TTS audio via Gemini
-        audio_b64 = generate_tts_audio(word)
+# --- Mock Authentication Handlers (Based on previous correct implementation) ---
 
-        entry = {
-            "word": word,
-            "pronunciation": pron,
-            "definition": item.get("definition", "No definition.").capitalize(),
-            "tip": item.get("tip", "No tip available."),
-            "usage": item.get("usage", "No example sentence.").capitalize(),
-            "sat_level": "High",
-            "audio_base64": audio_b64
-        }
-        words_with_data.append(entry)
-        progress.progress((i + 1) / len(raw_list))
-
-    progress.empty()
-    return words_with_data
-
-# ======================================================================
-# Rest of your app (unchanged except small fixes)
-# ======================================================================
-# [All the session state, load/save, auth, UI functions remain exactly as before]
-# ... (display_vocabulary_ui, quiz, admin, etc.)
-
-# Just paste the rest of your original functions below this line:
-# - load_vocabulary_from_file()
-# - save_vocabulary_to_file()
-# - load_and_update_vocabulary_data()
-# - handle_auth(), handle_logout()
-# - display_vocabulary_ui() → only small change: show pronunciation in bold
-# - generate_quiz_ui(), admin_extraction_ui(), main()
-
-# Example small tweak in display_vocabulary_ui():
-# Change line:
-# expander_title = f"**{word_number}.** {word} - {pronunciation}"
-# → Keep as-is, now pronunciation is accurate and fast!
-
-# ======================================================================
-# MAIN (unchanged structure)
-# ======================================================================
-def main():
-    st.set_page_config(page_title="AI Vocabulary Builder", layout="wide")
-    st.title("AI-Powered SAT Vocabulary Builder")
-
-    # Sidebar login (same as yours)
-    with st.sidebar:
-        # ... your login code ...
-
-    if not st.session_state.get("is_auth", False):
-        st.info("Please log in from the sidebar.")
+def handle_auth(action: str, email: str, password: str):
+    """
+    Handles Mock user registration and login.
+    """
+    if not email or not password:
+        st.error("Please enter both Email and Password.")
+        return
+        
+    # 1. Admin Login Check
+    if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+        is_admin = True
+        
+    # 2. General User Login Check (Simple Format Validation)
+    elif len(password) >= 6 and '@' in email and '.' in email:
+        is_admin = False
+    
+    else:
+        st.error("Invalid credentials. Registration/Login requires a valid email and 6+ character password.")
         return
 
-    # Auto-load and extract
-    load_and_update_vocabulary_data()
+    # Login/Register Success
+    st.session_state.current_user_email = email
+    st.session_state.is_auth = True
+    st.session_state.is_admin = is_admin
+    st.session_state.words_displayed = LOAD_BATCH_SIZE
+    st.session_state.quiz_start_index = 0
+    
+    display_name = "Admin" if is_admin else email
+    st.success(f"Logged in as: {display_name}! Access granted (Simulated).")
+    load_and_update_vocabulary_data() 
+    st.rerun()
+            
 
-    tab1, tab2, tab3 = st.tabs(["Vocabulary List", "Quiz", "Data Tools"])
+def handle_logout():
+    """Handles session state reset."""
+    st.session_state.is_auth = False
+    st.session_state.current_user_email = None
+    st.session_state.quiz_active = False
+    st.session_state.is_admin = False
+    st.session_state.words_displayed = LOAD_BATCH_SIZE
+    st.rerun()
 
-    with tab1:
-        display_vocabulary_ui()
-    with tab2:
-        generate_quiz_ui()
-    with tab3:
-        admin_extraction_ui()
+# ----------------------------------------------------------------------
+# 4. UI COMPONENTS: VOCABULARY, QUIZ, ADMIN
+# ----------------------------------------------------------------------
+
+def load_more_words():
+    """Increments the displayed word count."""
+    st.session_state.words_displayed += LOAD_BATCH_SIZE
+    st.rerun()
+
+def display_vocabulary_ui():
+    """Renders the Vocabulary Display feature with Load More functionality."""
+    st.header("📚 Vocabulary Display", divider="blue")
+    
+    if not st.session_state.vocab_data:
+        st.info("No vocabulary loaded yet. Please check the data status.")
+        return
+
+    total_words = len(st.session_state.vocab_data)
+    words_to_show = min(total_words, st.session_state.words_displayed)
+    
+    st.markdown(f"**Showing {words_to_show} of {total_words} High-Level SAT Words**")
+    
+    with st.container(height=500, border=True):
+        for i, data in enumerate(st.session_state.vocab_data[:words_to_show]):
+            word_number = i + 1 
+            word = data.get('word', 'N/A').upper()
+            pronunciation = data.get('pronunciation', 'N/A')
+            tip = data.get('tip', 'N/A')
+            usage = data.get('usage', 'N/A')
+            # 🟢 CHANGE: Fetch base64 audio data
+            audio_base64 = data.get('audio_base64') 
+            definition = data.get('definition', 'N/A')
+            
+            expander_title = f"**{word_number}.** {word} - {pronunciation}"
+            
+            with st.expander(expander_title):
+                
+                # --- AUDIO PLAYBACK (USES BASE64 WAV DATA from Gemini TTS) ---
+                if audio_base64:
+                    # MIME type must be changed to audio/wav for Gemini TTS output
+                    audio_data_url = f"data:audio/wav;base64,{audio_base64}"
+                    audio_html = f"""
+                        <audio controls style="width: 100%;" src="{audio_data_url}">
+                            Your browser does not support the audio element.
+                        </audio>
+                    """
+                    st.markdown(audio_html, unsafe_allow_html=True)
+                else:
+                    st.warning("Audio not available for this word. TTS generation may have failed.")
+
+                st.markdown(f"**Definition:** {definition.capitalize()}")
+                st.markdown(f"**Memory Tip:** *{tip}*") 
+                st.markdown(f"**Usage:** *'{usage}'*")
+
+    if words_to_show < total_words:
+        if st.button(f"Load {LOAD_BATCH_SIZE} More Words", on_click=load_more_words, type="secondary"):
+            pass
+
+def start_new_quiz():
+    """
+    Initializes the quiz based only on the currently displayed words in sequential order.
+    """
+    start = st.session_state.quiz_start_index
+    end = start + QUIZ_SIZE
+    
+    # Ensure quiz words are picked sequentially from the current vocabulary data
+    words_pool = st.session_state.vocab_data[start:end]
+    
+    if len(words_pool) < QUIZ_SIZE:
+        st.error(f"Cannot start quiz. Need {QUIZ_SIZE} words starting from position {start + 1}.")
+        return
+
+    quiz_details = []
+    all_definitions = [d['definition'].capitalize() for d in st.session_state.vocab_data]
+    
+    for question_data in words_pool:
+        correct_answer = question_data['definition'].capitalize()
+        
+        # Select 3 unique decoy definitions from the full list
+        decoys = random.sample([
+            d for d in all_definitions if d != correct_answer
+        ], min(3, len([d for d in all_definitions if d != correct_answer])))
+        
+        options = [correct_answer] + decoys
+        random.shuffle(options)
+        
+        # Calculate the word's original index
+        original_word_index = st.session_state.vocab_data.index(question_data) + 1
+        
+        quiz_details.append({
+            "word": question_data['word'],
+            "correct_answer": correct_answer,
+            "tip": question_data['tip'],
+            "usage": question_data['usage'],
+            "options": options,
+            "index": original_word_index
+        })
+        
+    st.session_state.quiz_details = quiz_details
+    st.session_state.quiz_active = True
+    st.session_state.quiz_results = None 
+
+def advance_quiz_index():
+    st.session_state.quiz_start_index += QUIZ_SIZE
+    st.session_state.quiz_active = False 
+
+def generate_quiz_ui():
+    """Renders the Quiz Section feature."""
+    st.header("📝 Vocabulary Quiz", divider="green")
+    
+    total_words = len(st.session_state.vocab_data)
+    
+    if total_words < QUIZ_SIZE:
+        st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}")
+        return
+
+    start_word_num = st.session_state.quiz_start_index + 1
+    end_word_num = min(st.session_state.quiz_start_index + QUIZ_SIZE, total_words)
+    
+    
+    if not st.session_state.quiz_active:
+        
+        if start_word_num > total_words:
+            st.info("You have completed all available quiz blocks! Resetting to start.")
+            st.session_state.quiz_start_index = 0
+            start_word_num = 1
+            end_word_num = min(QUIZ_SIZE, total_words)
+            
+        st.markdown(f"**Current Quiz Block:** Words {start_word_num} through {end_word_num}.")
+        
+        st.button(
+            f"Start Quiz on Words #{start_word_num} - #{end_word_num}", 
+            on_click=start_new_quiz, 
+            type="primary"
+        )
+        return
+    
+    # --- Results Display ---
+    if st.session_state.quiz_results is not None:
+        score = st.session_state.quiz_results['score']
+        total = st.session_state.quiz_results['total']
+        accuracy = st.session_state.quiz_results['accuracy']
+        
+        # NOTE: Quiz results are NOT saved to database in this stable version.
+        
+        if score == total:
+            st.balloons()
+            st.success(f"🎉 Quiz Complete! Perfect Score! {score} out of {total} (Accuracy: {accuracy}%)")
+        else:
+            st.warning(f"Quiz Complete! Final Score: **{score}** out of **{total}** (Accuracy: {accuracy}%)")
+            
+        st.subheader("Review Your Answers")
+        for i, result in enumerate(st.session_state.quiz_results['feedback']):
+            st.markdown(f"#### **Word #{result['index']}: {result['word']}**") 
+            st.markdown(f"**Your Answer:** {result['user_choice']}")
+            st.markdown(f"**Correct Answer:** {result['correct_answer']}")
+            
+            if not result['is_correct']:
+                 st.markdown(f"**Memory Tip:** *{result['tip']}*")
+                 st.markdown(f"**Usage:** *'{result['usage']}'*")
+            
+            st.markdown("---")
+            
+        st.session_state.quiz_results = None 
+        
+        next_start_index = st.session_state.quiz_start_index + QUIZ_SIZE
+        if next_start_index < total_words:
+            st.button(f"Start Next Quiz Block (Words #{next_start_index + 1} - #{min(next_start_index + QUIZ_SIZE, total_words)})", on_click=advance_quiz_index, type="secondary")
+        else:
+            st.info("You have completed all available words in the database!")
+            st.session_state.quiz_start_index = 0
+            st.button("Restart Quiz from Word #1", on_click=advance_quiz_index, type="secondary")
+            
+        return
+    
+    # --- Active Quiz Form ---
+    quiz_details = st.session_state.quiz_details
+    
+    with st.form(key="full_quiz_form"):
+        st.subheader(f"Answer the following {QUIZ_SIZE} questions:")
+        st.caption(f"Testing words **start_word_num** to **end_word_num**.")
+        
+        st.session_state.user_responses = [] 
+        
+        for i, q in enumerate(quiz_details):
+            st.markdown(f"#### **Word #{q['index']}. Define: {q['word'].upper()}**") 
+            
+            user_choice = st.radio(
+                "Select the correct definition:", 
+                q['options'], 
+                key=f"quiz_q_{i}", 
+                index=None,
+                label_visibility="collapsed"
+            )
+            st.session_state.user_responses.append(user_choice)
+
+        submitted = st.form_submit_button("Submit All Answers")
+
+        if submitted:
+            final_score = 0
+            feedback_list = []
+            
+            if any(response is None for response in st.session_state.user_responses):
+                st.error("Please answer ALL questions before submitting.")
+                return
+
+            for i, response in enumerate(st.session_state.user_responses):
+                q = quiz_details[i]
+                is_correct = (response == q['correct_answer'])
+                
+                if is_correct:
+                    final_score += 1
+                
+                feedback_list.append({
+                    "word": q['word'],
+                    "user_choice": response,
+                    "correct_answer": q['correct_answer'],
+                    "is_correct": is_correct,
+                    "tip": q['tip'],
+                    "usage": q['usage'],
+                    "index": q['index']
+                })
+            
+            st.session_state.quiz_results = {
+                "score": final_score,
+                "total": QUIZ_SIZE,
+                "accuracy": round((final_score / QUIZ_SIZE) * 100, 1),
+                "feedback": feedback_list
+            }
+            del st.session_state.user_responses
+            st.rerun()
+
+
+def admin_extraction_ui():
+    """Renders the Admin Extraction and User Management feature."""
+    st.header("💡 Data Tools", divider="orange") 
+    
+    if not st.session_state.is_admin:
+        st.warning("You must be logged in as the Admin to use this tool.")
+        return
+
+    # --- User Management & Progress Tracking (MOCK) ---
+    st.subheader("User Progress Overview")
+    st.warning("⚠️ User progress tracking is disabled because a reliable shared database (Firebase) could not be installed.")
+    st.markdown(f"""
+    **Current Admin Email:** `{ADMIN_EMAIL}`
+    
+    To implement this section, the app needs a persistent, shared backend database to track multiple users. This feature is mocked.
+    """)
+    st.dataframe([
+        {'Email': ADMIN_EMAIL, 'Status': 'Admin/Active', 'Quizzes Done': 'N/A'},
+        {'Email': 'user@example.com', 'Status': 'User/Mock', 'Quizzes Done': 'N/A'}
+    ], use_container_width=True)
+        
+    st.markdown("---")
+    
+    # --- Manual Extraction Override (Admin Only) ---
+    st.subheader("Vocabulary Extraction")
+    st.markdown(f"**Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).")
+
+    if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): 
+        st.info(f"Manually extracting {MANUAL_EXTRACT_BATCH} new words...")
+        
+        existing_words = [d['word'] for d in st.session_state.vocab_data]
+        new_batch = real_llm_vocabulary_extraction(MANUAL_EXTRACT_BATCH, existing_words) 
+        
+        if new_batch:
+            st.session_state.vocab_data.extend(new_batch)
+            save_vocabulary_to_file(st.session_state.vocab_data)
+            st.success(f"✅ Added {len(new_batch)} words to the database.")
+            st.rerun()
+        else:
+            st.error("Failed to generate new words. Check API key and logs.")
+
+# ----------------------------------------------------------------------
+# 5. STREAMLIT APPLICATION STRUCTURE
+# ----------------------------------------------------------------------
+
+def main():
+    """The main Streamlit application function."""
+    st.set_page_config(page_title="AI Vocabulary Builder", layout="wide")
+    st.title("🧠 AI-Powered Vocabulary Builder")
+    
+    # --- Sidebar for Auth Status ---
+    with st.sidebar:
+        st.header("User Login")
+        
+        if not st.session_state.is_auth:
+            
+            st.markdown("##### New User Registration / Existing User Login")
+            
+            user_email = st.text_input("📧 Email", key="user_email_input", value=st.session_state.current_user_email or "")
+            password = st.text_input("🔑 Password", type="password", key="password_input")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("Login", key="login_btn", type="primary"):
+                    handle_auth("login", user_email, password)
+            with col2:
+                if st.button("Register", key="register_btn"):
+                    handle_auth("register", user_email, password)
+            
+            st.markdown("---")
+            st.markdown(f"""
+            **Admin Login:** `{ADMIN_EMAIL}` / `Jamshaid,1981`
+            
+            **Note:** Use any email/6+ char password to simulate general user access.
+            """)
+            
+        else:
+            display_name = "Admin" if st.session_state.is_admin else st.session_state.current_user_email
+            st.success(f"Logged in as: **{display_name}**")
+            
+            if st.button("Log Out", on_click=handle_logout):
+                pass
+                
+    # --- Main Content ---
+    
+    if not st.session_state.is_auth:
+        st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
+    else:
+        # Load data on successful login 
+        if not st.session_state.vocab_data:
+            load_and_update_vocabulary_data() 
+
+        # Auto-extraction logic (non-blocking status message)
+        if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
+             st.info("The vocabulary list is currently building to the target size...")
+
+        # Use tabs for the main features
+        tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])
+        
+        with tab_display:
+            display_vocabulary_ui()
+            
+        with tab_quiz:
+            generate_quiz_ui()
+
+        with tab_admin:
+            admin_extraction_ui()
 
 if __name__ == "__main__":
-    # Initialize session state
-    for key in ['vocab_data', 'is_auth', 'is_admin', 'words_displayed', 'quiz_active', 'quiz_start_index']:
-        if key not in st.session_state:
-            st.session_state[key] = [] if key == 'vocab_data' else (LOAD_BATCH_SIZE if key == 'words_displayed' else 0 if 'index' in key else False)
-
     main()

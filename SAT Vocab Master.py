@@ -48,9 +48,13 @@ JSON_FILE_PATH = "vocab_data.json"
 # Target is the ultimate goal, but we use a smaller target for AUTO-EXTRACTION
 REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
-# 🟢 CHANGE: New target size for automatic extraction upon startup
+# 🟢 AUTO EXTRACTION TARGET AND BATCH: These constants are now unused but kept for clarity.
 AUTO_EXTRACT_TARGET_SIZE = 200 
-AUTO_EXTRACT_BATCH = 5 # How many words to extract automatically if under target
+AUTO_EXTRACT_BATCH = 5 
+
+# 🟢 ADMIN CREDENTIALS
+ADMIN_EMAIL = "rot.jamshaid@gmail.com"
+ADMIN_PASSWORD = "Jamshaid,1981"
 
 # Pydantic Schema for Structured AI Output - UPDATED to store audio URL
 class SatWord(BaseModel):
@@ -75,8 +79,7 @@ if 'vocab_data' not in st.session_state: st.session_state.vocab_data = []
 if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
-# 🟢 CHANGE: Flag to ensure auto-extraction only runs once per cycle
-if 'is_extracting' not in st.session_state: st.session_state.is_extracting = False 
+# 🟢 FLAG REMOVED: is_extracting flag is no longer needed.
 
 def load_vocabulary_from_file():
     """Loads vocabulary data from the local JSON file."""
@@ -134,10 +137,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
 
     list_schema = {"type": "array", "items": SatWord.model_json_schema()}
     config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
-
-    # 🔴 FIX: Removed the st.empty() and the blocking spinner wrapper 
-    # to prevent the StreamlitAPIException crash. The extraction is still blocking, 
-    # but the UI won't try to update itself during the blocked time.
     
     try:
         response = gemini_client.models.generate_content(
@@ -207,58 +206,39 @@ def load_and_update_vocabulary_data():
             st.rerun() # Rerun to properly display new words
 
 
-# 🟢 CHANGE: New function to manage the background/auto-extraction
-def check_and_start_auto_extraction():
-    """
-    Checks the database size against the target and triggers non-blocking extraction if needed.
-    """
-    word_count = len(st.session_state.vocab_data)
-    
-    if st.session_state.is_extracting:
-        # Already extracting, don't re-enter
-        return
-
-    if word_count < AUTO_EXTRACT_TARGET_SIZE:
-        
-        # Calculate how many words we need, capped at our small batch size
-        words_to_extract = min(AUTO_EXTRACT_TARGET_SIZE - word_count, AUTO_EXTRACT_BATCH)
-        
-        if words_to_extract > 0:
-            st.session_state.is_extracting = True
-            st.info(f"Auto-extracting {words_to_extract} new words in the background...")
-            
-            # --- Perform the slow operation (Blocking, but without conflicting UI elements) ---
-            existing_words = [d['word'] for d in st.session_state.vocab_data]
-            new_words = real_llm_vocabulary_extraction(words_to_extract, existing_words)
-            # --- End slow operation ---
-
-            st.session_state.is_extracting = False
-            
-            if new_words:
-                st.session_state.vocab_data.extend(new_words)
-                save_vocabulary_to_file(st.session_state.vocab_data)
-                st.success(f"✅ Background extracted {len(new_words)} words. Total: {len(st.session_state.vocab_data)}")
-                st.rerun()
-            else:
-                st.error("Could not automatically generate new words.")
-    else:
-        st.info(f"Database is healthy. Target size ({AUTO_EXTRACT_TARGET_SIZE}) met.")
-
-
 # --- Login Handler (Defined before main() to prevent NameError) ---
 def handle_login(user_id, password):
-    """Mocks email/password verification."""
+    """
+    Handles user login. Checks for hardcoded admin login first.
+    """
+    if not user_id or not password:
+        st.error("Please enter both Email and Password.")
+        return
+
+    # 🟢 ADMIN LOGIN CHECK
+    if user_id == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+        st.session_state.current_user_id = "Admin" 
+        st.session_state.is_auth = True
+        st.session_state.words_displayed = LOAD_BATCH_SIZE
+        st.session_state.quiz_start_index = 0
+        st.success(f"Logged in as: Admin ({ADMIN_EMAIL})! Access granted.")
+        load_and_update_vocabulary_data() 
+        return
     
-    if user_id and password:
+    # 🟢 STANDARD USER LOGIN (MOCK)
+    # Since email verification is not possible, this remains a mock login/signup
+    if len(password) >= 4 and '@' in user_id:
         st.session_state.current_user_id = user_id
         st.session_state.is_auth = True
-        st.session_state.words_displayed = LOAD_BATCH_SIZE # Reset display count on login
-        st.session_state.quiz_start_index = 0 # 🟢 Reset quiz index on login
-        st.success(f"Logged in as: {user_id}! Access granted.")
-        # 🟢 CHANGE: Trigger the fast load on login, ensuring data is available quickly
+        st.session_state.words_displayed = LOAD_BATCH_SIZE
+        st.session_state.quiz_start_index = 0
+        st.success(f"Logged in as: {user_id}! (Mock Access)")
         load_and_update_vocabulary_data() 
     else:
-        st.error("Please enter a valid Email and Password.")
+        st.error("Invalid credentials.")
+
+
+# 🟢 REMOVED: check_and_start_auto_extraction is no longer needed.
 
 def load_more_words():
     """Increments the displayed word count and triggers extraction if needed."""
@@ -581,13 +561,22 @@ def main():
         st.header("User Login")
         
         if not st.session_state.is_auth:
-            # Login form using email/password
-            user_input = st.text_input("📧 Email", key="user_email_input", value="jamshaid@example.com")
-            password_input = st.text_input("🔑 Password", type="password", key="password_input", value="password123")
             
-            # 🐞 FIX: Corrected typo from on_onclick to on_click
+            st.markdown("##### Admin/User Login")
+            
+            user_input = st.text_input("📧 Email", key="user_email_input", value=ADMIN_EMAIL)
+            password_input = st.text_input("🔑 Password", type="password", key="password_input", value=ADMIN_PASSWORD)
+            
             st.button("Login", on_click=handle_login, args=(user_input, password_input), type="primary")
-            st.caption("Mock login: Just enter text in both fields to proceed.")
+            
+            # 🟢 MOCK EXPLANATION FOR SIGN-UP LIMITATION
+            st.markdown("---")
+            st.markdown("""
+            **Note on Signup:** Due to security restrictions on Streamlit Cloud, the required 6-digit email verification code system is not possible without a separate backend service.
+            
+            For new users, please use **any email** and a password of **4 characters or more** to simulate signup/login.
+            """)
+            
         else:
             st.success(f"Logged in as: **{st.session_state.current_user_id}**")
             if st.button("Log Out"):
@@ -605,10 +594,12 @@ def main():
         st.info("Please log in using the sidebar to access the Vocabulary Builder.")
     else:
         # 🟢 CHANGE: Trigger the background extraction check (SLOW)
+        # This runs AFTER the UI has loaded the database content.
+        # It is intentionally placed here to be non-blocking.
         check_and_start_auto_extraction()
             
         # Use tabs for the main features
-        tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ AI Tools"])
+        tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])
         
         with tab_display:
             display_vocabulary_ui()

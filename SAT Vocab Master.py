@@ -324,21 +324,27 @@ def display_vocabulary_ui():
 
 
 def start_new_quiz():
-    """Initializes the quiz in session state."""
-    words = st.session_state.vocab_data
+    """
+    Initializes the quiz based only on the currently displayed words in the Vocabulary List.
+    """
+    words_to_draw = st.session_state.words_displayed
+    
+    # 🟢 FIX: Limit the pool of words to the words currently visible in the Vocabulary List
+    words_pool = st.session_state.vocab_data[:words_to_draw]
+    
     # 🟢 QUIZ CHANGE: Set QUIZ_SIZE to 5 questions
     QUIZ_SIZE = 5 
     
-    if len(words) < 4:
-        st.error("Not enough words for a meaningful quiz. Need at least 4 unique words.")
+    if len(words_pool) < 4:
+        st.error("Not enough words available in the current display pool for a meaningful quiz. Please load more words.")
         return
 
-    # Select 5 random words for the quiz
-    quiz_words = random.sample(words, min(QUIZ_SIZE, len(words)))
+    # Select 5 random words from the *displayed* pool for the quiz
+    quiz_words = random.sample(words_pool, min(QUIZ_SIZE, len(words_pool)))
     
     # Store quiz details for accurate scoring later
     quiz_details = []
-    all_definitions = [d['definition'].capitalize() for d in words]
+    all_definitions = [d['definition'].capitalize() for d in st.session_state.vocab_data]
     
     for question_data in quiz_words:
         correct_answer = question_data['definition'].capitalize()
@@ -351,12 +357,17 @@ def start_new_quiz():
         options = [correct_answer] + decoys
         random.shuffle(options)
         
+        # 🟢 Capture the original index (position + 1) for the quiz display
+        # Find the index of the selected word in the *full* vocabulary list
+        original_word_index = st.session_state.vocab_data.index(question_data) + 1
+        
         quiz_details.append({
             "word": question_data['word'],
             "correct_answer": correct_answer,
             "tip": question_data['tip'],
             "usage": question_data['usage'],
-            "options": options
+            "options": options,
+            "index": original_word_index  # Store the number for numbering
         })
         
     st.session_state.quiz_details = quiz_details
@@ -376,7 +387,7 @@ def generate_quiz_ui():
         return
 
     if not st.session_state.quiz_active:
-        st.button(f"Start New {QUIZ_SIZE}-Question Quiz", on_click=start_new_quiz, type="primary")
+        st.button(f"Start New {QUIZ_SIZE}-Question Quiz (Using Displayed Words)", on_click=start_new_quiz, type="primary")
         return
     
     # --- Results Display ---
@@ -394,8 +405,8 @@ def generate_quiz_ui():
         # Display feedback for each question
         st.subheader("Review Your Answers")
         for i, result in enumerate(st.session_state.quiz_results['feedback']):
-            # 🟢 CHANGE: Use i+1 for question numbering in results review
-            st.markdown(f"#### **{i+1}. {result['word']}**") 
+            # 🟢 CHANGE: Use original index number from the Vocabulary list
+            st.markdown(f"#### **Word #{result['index']}: {result['word']}**") 
             st.markdown(f"**Your Answer:** {result['user_choice']}")
             st.markdown(f"**Correct Answer:** {result['correct_answer']}")
             
@@ -422,8 +433,8 @@ def generate_quiz_ui():
         st.session_state.user_responses = [] 
         
         for i, q in enumerate(quiz_details):
-            # 🟢 CHANGE: Use i+1 for question numbering in the active quiz form
-            st.markdown(f"#### **{i + 1}. Define: {q['word'].upper()}**") 
+            # 🟢 CHANGE: Use the word's original index number for display
+            st.markdown(f"#### **Question {i + 1} (Word #{q['index']}). Define: {q['word'].upper()}**") 
             
             # Key must be unique per question
             user_choice = st.radio(
@@ -462,7 +473,8 @@ def generate_quiz_ui():
                     "correct_answer": q['correct_answer'],
                     "is_correct": is_correct,
                     "tip": q['tip'],
-                    "usage": q['usage']
+                    "usage": q['usage'],
+                    "index": q['index'] # Pass the original index to the results
                 })
             
             # Store final results

@@ -10,14 +10,8 @@ import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# --- FIREBASE IMPORTS (SWITCHED TO PYREBASE4) ---
-# NOTE: This implementation relies on pyrebase4 for auth and uses its structure
-# to interface with the core logic.
-try:
-    import pyrebase
-except ImportError:
-    st.error("🔴 FIREBASE ERROR: Please update requirements.txt to include 'pyrebase4' and ensure all dependencies are installed.")
-    st.stop()
+# --- FIREBASE REMOVED ---
+# Removed all imports related to 'firebase' or 'pyrebase4' to fix persistent deployment errors.
 
 # --- GEMS API ---
 try:
@@ -30,7 +24,7 @@ except ImportError:
 
 
 # ======================================================================
-# *** LOCAL EXECUTION SETUP & FIREBASE CONFIGURATION ***
+# *** LOCAL EXECUTION SETUP & FILE PATHS ***
 # ======================================================================
 
 # Check for API Key (Gemini)
@@ -46,48 +40,16 @@ except Exception as e:
     st.stop()
 
 # --- App State and Constants ---
+# Use a local JSON file for persistent storage
+JSON_FILE_PATH = "vocab_data.json" 
 REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
 AUTO_EXTRACT_TARGET_SIZE = 200 
 QUIZ_SIZE = 5 
 
-# Admin Configuration
+# Admin Configuration (Mock Login)
 ADMIN_EMAIL = "rot.jamshaid@gmail.com"
-
-# --- PYREBASE INITIALIZATION ---
-# This uses the environment configuration provided by the platform
-if '__firebase_config__' in globals():
-    try:
-        firebase_config_dict = json.loads(os.environ.get('__firebase_config__', '{}'))
-        # Pyrebase requires a different format for the config key (apiKey instead of projectId)
-        pyrebase_config = {
-            "apiKey": firebase_config_dict.get('apiKey'),
-            "authDomain": firebase_config_dict.get('authDomain'),
-            "databaseURL": firebase_config_dict.get('databaseURL'),
-            "projectId": firebase_config_dict.get('projectId'),
-            "storageBucket": firebase_config_dict.get('storageBucket'),
-            "messagingSenderId": firebase_config_dict.get('messagingSenderId'),
-            "appId": firebase_config_dict.get('appId')
-        }
-        firebase = pyrebase.initialize_app(pyrebase_config)
-        auth = firebase.auth()
-        db = firebase.database() # Pyrebase uses real-time database, we will simulate Firestore paths
-        
-        # Unique app ID for Firestore security paths
-        APP_ID = os.environ.get('__app_id__', 'sat_vocab_master') 
-        
-    except Exception as e:
-        st.error(f"🔴 Pyrebase/Firebase Initialization Failed: {e}")
-        db = None
-else:
-    st.error("🔴 Firebase environment configuration missing.")
-    db = None
-
-# --- Pyrebase Data Paths Simulation (for Firestore logic compatibility) ---
-# NOTE: Pyrebase uses Realtime Database, so we map our collection paths to RTDB nodes.
-# This makes the data structure incompatible with true Firestore, but it allows the app to run.
-RTDB_VOCAB_PATH = f"{APP_ID}/public/vocabulary"
-RTDB_USERS_PATH = f"{APP_ID}/users/profiles"
+ADMIN_PASSWORD = "Jamshaid,1981" 
 
 
 # Pydantic Schema for Vocabulary Word
@@ -101,7 +63,7 @@ class SatWord(BaseModel):
     audio_url: Optional[str] = Field(default=None, description="Public URL for MP3 audio pronunciation.")
 
 # ----------------------------------------------------------------------
-# 2. DATA PERSISTENCE & STATE MANAGEMENT
+# 2. DATA PERSISTENCE & STATE MANAGEMENT (LOCAL FILE)
 # ----------------------------------------------------------------------
 
 if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
@@ -111,81 +73,26 @@ if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
-if 'quiz_scores' not in st.session_state: st.session_state.quiz_scores = [] 
-if 'user_id_token' not in st.session_state: st.session_state.user_id_token = None # Store token for RTDB access
 
-# --- Pyrebase Realtime Database Data Management ---
+def load_vocabulary_from_file():
+    """Loads vocabulary data from the local JSON file."""
+    if os.path.exists(JSON_FILE_PATH):
+        with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
+            try:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+            except json.JSONDecodeError:
+                return []
+    return []
 
-@st.cache_data(ttl=3600, show_spinner=False)
-def get_all_vocabulary_from_db():
-    """Fetches all vocabulary words from the shared public database path (RTDB)."""
-    if not db: return []
+def save_vocabulary_to_file(data: List[Dict]):
+    """Saves the current vocabulary data to the local JSON file."""
+    # NOTE: This saving is unique to the server and not shared among users
     try:
-        # Fetch data from the Realtime Database path
-        data = db.child(RTDB_VOCAB_PATH).get().val()
-        if not data:
-            return []
-            
-        # Convert dictionary values to a list of dicts
-        raw_list = list(data.values()) if isinstance(data, dict) else []
-        
-        # Ensure data integrity by validating against the Pydantic model
-        validated_data = [SatWord(**d).model_dump() for d in raw_list if isinstance(d, dict)]
-        return validated_data
-        
-    except Exception as e:
-        st.error(f"Pyrebase Read Error (Vocabulary): {e}")
-        return []
-
-def save_new_vocabulary_to_db(new_words: List[Dict]):
-    """Saves new words to the shared public database path (RTDB)."""
-    if not db: return
-    try:
-        vocab_ref = db.child(RTDB_VOCAB_PATH)
-        for word_data in new_words:
-            # Use push() to generate a unique key for each word
-            vocab_ref.push(word_data) 
-            
-        st.toast(f"✅ Saved {len(new_words)} words to Database.")
-        get_all_vocabulary_from_db.clear() # Clear cache to fetch new data
-    except Exception as e:
-        st.error(f"Pyrebase Write Error (Vocabulary): {e}")
-
-def update_user_progress_in_db(quiz_score_data: Dict):
-    """Saves the latest quiz score data to the user's document (RTDB)."""
-    if not db or not st.session_state.current_user_email or not st.session_state.user_id_token: return
-    
-    try:
-        user_id = st.session_state.current_user_email.replace('.', ',') # Safe key for RTDB
-        user_ref = db.child(RTDB_USERS_PATH).child(user_id)
-        
-        # Structure the score entry
-        new_score = {
-            "timestamp": time.time(),
-            "score": quiz_score_data['score'],
-            "total": quiz_score_data['total'],
-            "accuracy": quiz_score_data['accuracy']
-        }
-        st.session_state.quiz_scores.append(new_score)
-        
-        # Fetch current data
-        user_data = user_ref.get(st.session_state.user_id_token).val() or {}
-        current_scores = user_data.get('quiz_scores', [])
-        current_scores.append(new_score)
-        
-        # Simple max score logic (Admin visibility)
-        max_score = max([s['score'] for s in current_scores], key=lambda x: x['score'])['score'] if current_scores else 0
-        
-        # Update user profile
-        user_ref.update({
-            'email': st.session_state.current_user_email,
-            'quiz_scores': current_scores,
-            'last_activity': new_score['timestamp'],
-            'max_score_5_questions': max_score
-        }, st.session_state.user_id_token) # Needs token for authorized write
-
-    except Exception as e:
-        st.warning(f"Failed to update user progress: {e}")
+        with open(JSON_FILE_PATH, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4)
+    except IOError as e:
+        st.error(f"Error saving data to {JSON_FILE_PATH}: {e}")
 
 # ----------------------------------------------------------------------
 # 3. AI EXTRACTION & AUTHENTICATION FUNCTIONS
@@ -228,15 +135,15 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
 
 def load_and_update_vocabulary_data():
     """
-    Loads existing data from Pyrebase RTDB (FAST) and checks initial word count.
+    Loads existing data from local file (FAST) and checks initial word count.
     """
     if not st.session_state.is_auth: return
     
-    st.session_state.vocab_data = get_all_vocabulary_from_db()
+    st.session_state.vocab_data = load_vocabulary_from_file()
     word_count = len(st.session_state.vocab_data)
     
     if word_count > 0:
-        st.info(f"✅ Loaded {word_count} words from the shared database.")
+        st.info(f"✅ Loaded {word_count} words from local file.")
     
     # Check if the initial required count (10 words for display) is met
     if word_count < LOAD_BATCH_SIZE:
@@ -247,70 +154,53 @@ def load_and_update_vocabulary_data():
         new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE - word_count, existing_words)
         
         if new_words:
-            save_new_vocabulary_to_db(new_words)
-            # Fetch updated data after saving
-            st.session_state.vocab_data = get_all_vocabulary_from_db()
+            st.session_state.vocab_data.extend(new_words)
+            save_vocabulary_to_file(st.session_state.vocab_data)
             st.success(f"✅ Initial {len(new_words)} words generated and saved.")
             st.rerun() 
 
 
-# --- Authentication Handlers ---
+# --- Mock Authentication Handlers (Based on previous correct implementation) ---
 
 def handle_auth(action: str, email: str, password: str):
     """
-    Handles Pyrebase user registration and login.
+    Handles Mock user registration and login.
     """
-    if not db:
-        st.error("Authentication system failed to initialize. Cannot proceed.")
-        return
-
     if not email or not password:
         st.error("Please enter both Email and Password.")
         return
-    if action == "register" and len(password) < 6:
-        st.error("Password must be at least 6 characters long.")
-        return
         
-    try:
-        if action == "register":
-            auth.create_user_with_email_and_password(email, password)
-            st.success("✅ Registration successful. Please Sign In.")
-            return
+    # 1. Admin Login Check
+    if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+        is_admin = True
+        
+    # 2. General User Login Check (Simple Format Validation)
+    elif len(password) >= 6 and '@' in email and '.' in email:
+        is_admin = False
+    
+    else:
+        st.error("Invalid credentials. Registration/Login requires a valid email and 6+ character password.")
+        return
 
-        elif action == "login":
-            user = auth.sign_in_with_email_and_password(email, password)
+    # Login/Register Success
+    st.session_state.current_user_email = email
+    st.session_state.is_auth = True
+    st.session_state.is_admin = is_admin
+    st.session_state.words_displayed = LOAD_BATCH_SIZE
+    st.session_state.quiz_start_index = 0
+    
+    display_name = "Admin" if is_admin else email
+    st.success(f"Logged in as: {display_name}! Access granted (Simulated).")
+    load_and_update_vocabulary_data() 
+    st.rerun()
             
-            # Store necessary session data
-            st.session_state.current_user_email = user['email']
-            st.session_state.user_id_token = user['idToken'] # Pyrebase requires ID token for secure writes
-            st.session_state.is_auth = True
-            st.session_state.is_admin = (user['email'] == ADMIN_EMAIL)
-            st.session_state.words_displayed = LOAD_BATCH_SIZE
-            st.session_state.quiz_start_index = 0
-            
-            display_name = "Admin" if st.session_state.is_admin else user['email']
-            st.success(f"Logged in as: {display_name}! Access granted.")
-            load_and_update_vocabulary_data() 
-            st.rerun()
-            
-
-    except Exception as e:
-        error_msg = str(e)
-        if "EMAIL_EXISTS" in error_msg:
-            st.error("This email is already registered. Please login.")
-        elif "INVALID_EMAIL" in error_msg or "INVALID_PASSWORD" in error_msg or "USER_NOT_FOUND" in error_msg:
-            st.error("Invalid email or password.")
-        else:
-            st.error(f"Authentication failed: {error_msg}")
 
 def handle_logout():
-    """Handles session state reset and signs out the user."""
-    # Pyrebase doesn't have a direct sign_out method; we clear local tokens/state.
+    """Handles session state reset."""
     st.session_state.is_auth = False
     st.session_state.current_user_email = None
-    st.session_state.user_id_token = None
     st.session_state.quiz_active = False
-    st.session_state.quiz_scores = []
+    st.session_state.is_admin = False
     st.session_state.words_displayed = LOAD_BATCH_SIZE
     st.rerun()
 
@@ -453,8 +343,7 @@ def generate_quiz_ui():
         total = st.session_state.quiz_results['total']
         accuracy = st.session_state.quiz_results['accuracy']
         
-        # Save score to Firestore before displaying results
-        update_user_progress_in_db(st.session_state.quiz_results)
+        # NOTE: Quiz results are NOT saved to Firestore/RTDB anymore.
         
         if score == total:
             st.balloons()
@@ -552,35 +441,18 @@ def admin_extraction_ui():
         st.warning("You must be logged in as the Admin to use this tool.")
         return
 
-    # --- User Management & Progress Tracking ---
+    # --- User Management & Progress Tracking (MOCK) ---
     st.subheader("User Progress Overview")
+    st.warning("⚠️ User progress tracking is disabled because a reliable shared database (Firebase) could not be installed.")
+    st.markdown(f"""
+    **Current Admin Email:** `{ADMIN_EMAIL}`
     
-    if not db:
-        st.error("Cannot access user data. Database is not initialized.")
-        return
-        
-    try:
-        # Fetch data from the Realtime Database path
-        user_data = db.child(RTDB_USERS_PATH).get(st.session_state.user_id_token).val()
-        
-        user_list = []
-        if user_data:
-            for user_key, data in user_data.items():
-                if isinstance(data, dict):
-                    user_list.append({
-                        'Email': data.get('email', user_key.replace(',', '.')), # Decode email
-                        'Max Score': data.get('max_score_5_questions', 0),
-                        'Last Activity': time.strftime('%Y-%m-%d %H:%M', time.localtime(data.get('last_activity', 0))),
-                        'Total Quizzes': len(data.get('quiz_scores', []))
-                    })
-
-        if user_list:
-            st.dataframe(user_list, use_container_width=True)
-        else:
-            st.info("No registered users have completed a quiz yet.")
-            
-    except Exception as e:
-        st.error(f"Error fetching user data: {e}")
+    To implement this section, the app needs a persistent, shared backend database to track multiple users. Since the deployment failed on Firebase, this feature must be mocked.
+    """)
+    st.dataframe([
+        {'Email': ADMIN_EMAIL, 'Status': 'Admin/Active', 'Quizzes Done': 'N/A'},
+        {'Email': 'user@example.com', 'Status': 'User/Mock', 'Quizzes Done': 'N/A'}
+    ], use_container_width=True)
         
     st.markdown("---")
     
@@ -595,10 +467,9 @@ def admin_extraction_ui():
         new_batch = real_llm_vocabulary_extraction(5, existing_words)
         
         if new_batch:
-            save_new_vocabulary_to_db(new_batch)
+            st.session_state.vocab_data.extend(new_batch)
+            save_vocabulary_to_file(st.session_state.vocab_data)
             st.success(f"✅ Added {len(new_batch)} words to the database.")
-            # Reload data and rerun the app to show new words
-            get_all_vocabulary_from_db.clear() 
             st.rerun()
         else:
             st.error("Failed to generate new words. Check API key and logs.")
@@ -616,13 +487,6 @@ def main():
     with st.sidebar:
         st.header("User Login")
         
-        # Check authentication state
-        # Pyrebase does not provide a simple is_user_logged_in wrapper like the 'firebase' library.
-        # We rely on session state token presence.
-        if st.session_state.user_id_token and not st.session_state.is_auth:
-             # This is a soft re-authentication attempt if the token is set but state is false
-             st.session_state.is_auth = True 
-
         if not st.session_state.is_auth:
             
             st.markdown("##### New User Registration / Existing User Login")
@@ -643,7 +507,7 @@ def main():
             st.markdown(f"""
             **Admin Login:** `{ADMIN_EMAIL}` / `Jamshaid,1981`
             
-            **Note:** Registration requires a unique email and 6+ character password.
+            **Note:** Use any email/6+ char password to simulate general user access.
             """)
             
         else:
@@ -658,7 +522,7 @@ def main():
     if not st.session_state.is_auth:
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
-        # Load data on successful login or re-authentication
+        # Load data on successful login 
         if not st.session_state.vocab_data:
             load_and_update_vocabulary_data() 
 

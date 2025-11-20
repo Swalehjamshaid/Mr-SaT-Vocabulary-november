@@ -47,7 +47,8 @@ QUIZ_SIZE = 5
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
 ADMIN_PASSWORD = "Jamshaid,1981" 
-MANUAL_EXTRACT_BATCH = 50 
+# Manual extraction batch size reduced to 5 for stable TTS generation
+MANUAL_EXTRACT_BATCH = 5 
 
 
 # Pydantic Schema for Vocabulary Word
@@ -150,7 +151,7 @@ def generate_tts_audio(text: str) -> Optional[str]:
         mime_type = audio_part.mimeType # Should be audio/L16;rate=24000
         
         if not pcm_base64 or 'audio/L16' not in mime_type:
-            st.warning(f"TTS API response missing expected audio data for: {text}")
+            # If API returns an error or empty data
             return None
             
         # Extract sample rate from mime type (default to 24000 if extraction fails)
@@ -171,7 +172,8 @@ def generate_tts_audio(text: str) -> Optional[str]:
         return base64.b64encode(wav_bytes).decode('utf-8')
 
     except Exception as e:
-        st.error(f"🔴 Gemini TTS Generation Failed for '{text}': {e}")
+        # Log the detailed error but return None
+        print(f"TTS Generation failed for word: {text}. Error: {e}")
         return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
@@ -541,7 +543,7 @@ def admin_extraction_ui():
     st.markdown(f"""
     **Current Admin Email:** `{ADMIN_EMAIL}`
     
-    To implement this section, the app needs a persistent, shared backend database to track multiple users. Since the deployment failed on Firebase, this feature must be mocked.
+    To implement this section, the app needs a persistent, shared backend database to track multiple users. This feature is mocked.
     """)
     st.dataframe([
         {'Email': ADMIN_EMAIL, 'Status': 'Admin/Active', 'Quizzes Done': 'N/A'},

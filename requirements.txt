@@ -1,6 +1,8 @@
-streamlit
-pydantic
-google-genai
-firebase
-pyrebase4
-gTTS
+streamlit>=1.38.0
+pandas>=1.5.0
+eng-to-ipa>=0.2.0
+gspread>=5.0
+google-auth>=2.0
+google-auth-oauthlib>=1.0
+google-auth-httplib2>=0.1
+google-api-python-client>=2.0

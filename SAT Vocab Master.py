@@ -58,7 +58,7 @@ class SatWord(BaseModel):
     tip: str = Field(description="A short, catchy mnemonic memory tip.")
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
-    # 🟢 CHANGE: The audio field now stores the Base64-encoded audio data (PCM WAV format)
+    # The audio field stores the Base64-encoded audio data (PCM WAV format)
     audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
 
 # ----------------------------------------------------------------------
@@ -97,11 +97,8 @@ def save_vocabulary_to_file(data: List[Dict]):
 # 3. AI EXTRACTION & AUDIO FUNCTIONS
 # ----------------------------------------------------------------------
 
-# 🔴 REMOVED: construct_tts_url function
-
 def pcm_to_wav(pcm_data: bytes, sample_rate: int) -> bytes:
-    """Converts raw PCM audio data into a standard WAV file format."""
-    # This is a standard WAV header creation function
+    """Converts raw PCM audio data into a standard WAV file format using only built-in libraries."""
     
     # 1. Prepare header components
     channels = 1
@@ -140,7 +137,7 @@ def generate_tts_audio(text: str) -> Optional[str]:
             }
         )
         
-        # 🔴 NOTE: Use gemini-2.5-flash-preview-tts for TTS
+        # NOTE: Use gemini-2.5-flash-preview-tts for TTS
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash-preview-tts", 
             contents=[{"parts": [{"text": text}]}], 
@@ -158,7 +155,9 @@ def generate_tts_audio(text: str) -> Optional[str]:
             
         # Extract sample rate from mime type (default to 24000 if extraction fails)
         try:
-            sample_rate = int(mime_type.split('rate=')[1])
+            # Safely extract rate from the mime type string
+            rate_match = [part for part in mime_type.split(';') if 'rate=' in part]
+            sample_rate = int(rate_match[0].split('=')[1]) if rate_match else 24000
         except:
             sample_rate = 24000
 

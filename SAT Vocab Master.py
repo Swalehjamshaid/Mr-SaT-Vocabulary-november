@@ -10,9 +10,6 @@ import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# --- FIREBASE REMOVED ---
-# Removed all imports related to 'firebase' or 'pyrebase4' to fix persistent deployment errors.
-
 # --- GEMS API ---
 try:
     from google import genai
@@ -48,10 +45,8 @@ AUTO_EXTRACT_TARGET_SIZE = 200
 QUIZ_SIZE = 5 
 
 # Admin Configuration (Mock Login)
-ADMIN_EMAIL = "roy.jamshaid@gmail.com" # 🟢 FIX: Corrected email to 'roy.jamshaid@gmail.com'
+ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
 ADMIN_PASSWORD = "Jamshaid,1981" 
-
-# 🟢 CHANGE: Increased extraction batch size to 50
 MANUAL_EXTRACT_BATCH = 50 
 
 
@@ -63,7 +58,8 @@ class SatWord(BaseModel):
     tip: str = Field(description="A short, catchy mnemonic memory tip.")
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
-    audio_url: Optional[str] = Field(default=None, description="Public URL for MP3 audio pronunciation.")
+    # 🟢 CHANGE: The audio field now stores the Base64-encoded audio data (PCM WAV format)
+    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
 
 # ----------------------------------------------------------------------
 # 2. DATA PERSISTENCE & STATE MANAGEMENT (LOCAL FILE)
@@ -98,19 +94,94 @@ def save_vocabulary_to_file(data: List[Dict]):
         st.error(f"Error saving data to {JSON_FILE_PATH}: {e}")
 
 # ----------------------------------------------------------------------
-# 3. AI EXTRACTION & AUTHENTICATION FUNCTIONS
+# 3. AI EXTRACTION & AUDIO FUNCTIONS
 # ----------------------------------------------------------------------
 
-def construct_tts_url(text: str) -> str:
-    """Constructs a reliable TTS URL using Google's public endpoint."""
-    encoded_text = urllib.parse.quote(text)
-    return f"https://translate.google.com/translate_tts?ie=UTF-8&q={encoded_text}&tl=en&client=tw-ob"
+# 🔴 REMOVED: construct_tts_url function
 
+def pcm_to_wav(pcm_data: bytes, sample_rate: int) -> bytes:
+    """Converts raw PCM audio data into a standard WAV file format."""
+    # This is a standard WAV header creation function
+    
+    # 1. Prepare header components
+    channels = 1
+    bits_per_sample = 16
+    bytes_per_sample = bits_per_sample // 8
+    byte_rate = sample_rate * channels * bytes_per_sample
+    
+    # Total size of the PCM data
+    data_size = len(pcm_data)
+    
+    # 2. Construct the header
+    header = b'RIFF'                           # ChunkID
+    header += (36 + data_size).to_bytes(4, 'little') # ChunkSize
+    header += b'WAVE'                           # Format
+    header += b'fmt '                           # Subchunk1ID
+    header += (16).to_bytes(4, 'little')        # Subchunk1Size (16 for PCM)
+    header += (1).to_bytes(2, 'little')         # AudioFormat (1 for PCM)
+    header += channels.to_bytes(2, 'little')    # NumChannels
+    header += sample_rate.to_bytes(4, 'little') # SampleRate
+    header += byte_rate.to_bytes(4, 'little')   # ByteRate
+    header += bytes_per_sample.to_bytes(2, 'little') # BlockAlign
+    header += bits_per_sample.to_bytes(2, 'little')  # BitsPerSample
+    header += b'data'                           # Subchunk2ID
+    header += data_size.to_bytes(4, 'little')   # Subchunk2Size
+
+    return header + pcm_data
+
+def generate_tts_audio(text: str) -> Optional[str]:
+    """Generates audio via Gemini TTS and returns Base64 encoded WAV data."""
+    try:
+        # Use a reliable voice (Kore is a clear voice)
+        tts_config = types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config={
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}
+            }
+        )
+        
+        # 🔴 NOTE: Use gemini-2.5-flash-preview-tts for TTS
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash-preview-tts", 
+            contents=[{"parts": [{"text": text}]}], 
+            config=tts_config
+        )
+
+        # Extract base64 PCM data and mime type
+        audio_part = response.candidates[0].content.parts[0].inlineData
+        pcm_base64 = audio_part.data
+        mime_type = audio_part.mimeType # Should be audio/L16;rate=24000
+        
+        if not pcm_base64 or 'audio/L16' not in mime_type:
+            st.warning(f"TTS API response missing expected audio data for: {text}")
+            return None
+            
+        # Extract sample rate from mime type (default to 24000 if extraction fails)
+        try:
+            sample_rate = int(mime_type.split('rate=')[1])
+        except:
+            sample_rate = 24000
+
+        # Decode base64 PCM data
+        pcm_bytes = base64.b64decode(pcm_base64)
+        
+        # Convert raw PCM bytes to WAV format
+        wav_bytes = pcm_to_wav(pcm_bytes, sample_rate)
+        
+        # Encode the final WAV bytes back to base64 for embedding in the HTML audio tag
+        return base64.b64encode(wav_bytes).decode('utf-8')
+
+    except Exception as e:
+        st.error(f"🔴 Gemini TTS Generation Failed for '{text}': {e}")
+        return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
-    Calls the Gemini API to generate structured vocabulary data and constructs the audio URL.
+    1. Calls the Gemini API to generate structured vocabulary data.
+    2. Calls the Gemini TTS model for each word to generate and encode the audio.
     """
+    
+    # --- Step 1: Generate Text Data (Remains the same using gemini-2.5-flash) ---
     prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
 
     list_schema = {"type": "array", "items": SatWord.model_json_schema()}
@@ -126,14 +197,31 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         st.error(f"🔴 Gemini Text Extraction Failed: {e}")
         return []
         
+    # --- Step 2: Generate and Attach Audio Data (TTS) ---
     words_with_audio = []
-    with st.spinner(f"🔗 Constructing audio links for {len(validated_words)} words..."):
-        for word_data in validated_words:
-            word = word_data['word']
-            audio_url = construct_tts_url(word)
-            word_data['audio_url'] = audio_url
-            words_with_audio.append(word_data)
-
+    
+    # We use a progress bar for the slow step
+    progress_bar = st.progress(0, text=f"Generating TTS audio for 0 of {len(validated_words)} words...")
+    
+    for i, word_data in enumerate(validated_words):
+        word = word_data['word']
+        
+        # Call the TTS function
+        audio_data = generate_tts_audio(word)
+        
+        if audio_data:
+            word_data['audio_base64'] = audio_data
+        else:
+            word_data['audio_base64'] = None # Explicitly set to None if generation fails
+            
+        words_with_audio.append(word_data)
+        
+        # Update progress bar
+        progress = (i + 1) / len(validated_words)
+        progress_bar.progress(progress, text=f"Generating TTS audio for {i + 1} of {len(validated_words)} words...")
+        
+    progress_bar.empty() # Clear progress bar on completion
+    
     return words_with_audio
 
 def load_and_update_vocabulary_data():
@@ -236,22 +324,26 @@ def display_vocabulary_ui():
             pronunciation = data.get('pronunciation', 'N/A')
             tip = data.get('tip', 'N/A')
             usage = data.get('usage', 'N/A')
-            audio_url = data.get('audio_url')
+            # 🟢 CHANGE: Fetch base64 audio data
+            audio_base64 = data.get('audio_base64') 
             definition = data.get('definition', 'N/A')
             
             expander_title = f"**{word_number}.** {word} - {pronunciation}"
             
             with st.expander(expander_title):
                 
-                if audio_url:
+                # --- AUDIO PLAYBACK (USES BASE64 WAV DATA) ---
+                if audio_base64:
+                    # Construct the data URL for the WAV format audio
+                    audio_data_url = f"data:audio/wav;base64,{audio_base64}"
                     audio_html = f"""
-                        <audio controls style="width: 100%;" src="{audio_url}">
+                        <audio controls style="width: 100%;" src="{audio_data_url}">
                             Your browser does not support the audio element.
                         </audio>
                     """
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
-                    st.warning("Audio URL is missing for this word.")
+                    st.warning("Audio not available for this word. TTS generation may have failed.")
 
                 st.markdown(f"**Definition:** {definition.capitalize()}")
                 st.markdown(f"**Memory Tip:** *{tip}*") 
@@ -346,7 +438,7 @@ def generate_quiz_ui():
         total = st.session_state.quiz_results['total']
         accuracy = st.session_state.quiz_results['accuracy']
         
-        # NOTE: Quiz results are NOT saved to Firestore/RTDB anymore.
+        # NOTE: Quiz results are NOT saved to database in this stable version.
         
         if score == total:
             st.balloons()
@@ -463,11 +555,11 @@ def admin_extraction_ui():
     st.subheader("Vocabulary Extraction")
     st.markdown(f"**Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).")
 
-    if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): # 🟢 CHANGE: Use new constant
+    if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): 
         st.info(f"Manually extracting {MANUAL_EXTRACT_BATCH} new words...")
         
         existing_words = [d['word'] for d in st.session_state.vocab_data]
-        new_batch = real_llm_vocabulary_extraction(MANUAL_EXTRACT_BATCH, existing_words) # 🟢 CHANGE: Use new constant
+        new_batch = real_llm_vocabulary_extraction(MANUAL_EXTRACT_BATCH, existing_words) 
         
         if new_batch:
             st.session_state.vocab_data.extend(new_batch)

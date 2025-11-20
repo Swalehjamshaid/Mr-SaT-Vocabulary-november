@@ -2,3 +2,4 @@ streamlit
 pydantic
 google-genai
 firebase
+pyrebase4

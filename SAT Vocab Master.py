@@ -12,6 +12,7 @@ from pydantic import json_schema
 
 # --- FIREBASE IMPORTS ---
 try:
+    # This block requires 'firebase' to be successfully installed via requirements.txt
     from firebase import initialize_app, get_auth, sign_up, sign_in, sign_out, is_user_logged_in, get_user_id
     from firebase import get_firestore, doc, set_doc, get_doc, collection, query, where, get_docs
 except ImportError:

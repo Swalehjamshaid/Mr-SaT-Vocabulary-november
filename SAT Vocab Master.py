@@ -20,10 +20,6 @@ except ImportError:
     st.error("Please run: pip install google-genai pydantic")
     st.stop()
 
-# 🔴 FIX: Removed the non-compatible Firebase import block.
-# --- FIREBASE INITIALIZATION REMOVED --- 
-# ----------------------------------------------------
-
 
 # ======================================================================
 # *** LOCAL EXECUTION SETUP & FILE PATHS ***
@@ -149,6 +145,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     words_with_audio = []
     
+    # 🔴 FIX: Using st.spinner to show activity during the relatively fast audio link construction
     with st.spinner(f"🔗 Constructing audio links for {len(validated_words)} words..."):
         
         for word_data in validated_words:
@@ -195,8 +192,6 @@ def load_and_update_vocabulary_data():
 # 4. AUTHENTICATION (SECURE MOCK FOR STREAMLIT CLOUD)
 # ----------------------------------------------------------------------
 
-# 🔴 Reverting to secure mock structure due to environment limitations.
-
 def handle_login(email: str, password: str):
     """
     Handles user sign-in/login with internal validation.
@@ -205,7 +200,7 @@ def handle_login(email: str, password: str):
         st.error("Please enter both Email and Password.")
         return
 
-    # 🟢 ADMIN LOGIN CHECK
+    # 🟢 ADMIN LOGIN CHECK (Case-sensitive for password)
     if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
         st.session_state.current_user_email = ADMIN_EMAIL
         st.session_state.is_auth = True
@@ -216,8 +211,8 @@ def handle_login(email: str, password: str):
         return
 
     # 🟢 STANDARD USER LOGIN/SIGNUP (MOCK)
-    # Since real email verification is impossible in this setup, we mock registration/login.
-    if len(password) >= 6 and '@' in email:
+    # Simulates registration/login for any new valid user.
+    if len(password) >= 6 and '@' in email and '.' in email:
         st.session_state.current_user_email = email
         st.session_state.is_auth = True
         st.session_state.words_displayed = LOAD_BATCH_SIZE
@@ -225,7 +220,7 @@ def handle_login(email: str, password: str):
         st.success(f"Logged in as: {email}! (Simulated Access)")
         load_and_update_vocabulary_data() 
     else:
-        st.error("Invalid credentials. Password must be 6+ characters and include '@'.")
+        st.error("Invalid credentials. Password must be 6+ characters and the email must be valid.")
         
 def handle_logout():
     """Handles session state reset on logout."""
@@ -528,7 +523,7 @@ def main():
                 if st.button("Login", key="login_btn", type="primary"):
                     handle_login(user_email, password)
             with col2:
-                # 🔴 NOTE: Sign up is handled by the same login simulation logic due to environment constraints.
+                # 🔴 NOTE: Register is handled by the same login simulation logic due to environment constraints.
                 if st.button("Register", key="register_btn"):
                     handle_login(user_email, password)
             

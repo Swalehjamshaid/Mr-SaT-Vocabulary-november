@@ -10,13 +10,13 @@ import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# --- FIREBASE IMPORTS ---
+# --- FIREBASE IMPORTS (SWITCHED TO PYREBASE4) ---
+# NOTE: This implementation relies on pyrebase4 for auth and uses its structure
+# to interface with the core logic.
 try:
-    # This block requires 'firebase' to be successfully installed via requirements.txt
-    from firebase import initialize_app, get_auth, sign_up, sign_in, sign_out, is_user_logged_in, get_user_id
-    from firebase import get_firestore, doc, set_doc, get_doc, collection, query, where, get_docs
+    import pyrebase
 except ImportError:
-    st.error("🔴 FIREBASE ERROR: Please update requirements.txt with the necessary Firebase libraries and run in a compatible environment.")
+    st.error("🔴 FIREBASE ERROR: Please update requirements.txt to include 'pyrebase4' and ensure all dependencies are installed.")
     st.stop()
 
 # --- GEMS API ---
@@ -54,27 +54,40 @@ QUIZ_SIZE = 5
 # Admin Configuration
 ADMIN_EMAIL = "rot.jamshaid@gmail.com"
 
-# Firestore Initialization (Uses environment provided config)
+# --- PYREBASE INITIALIZATION ---
+# This uses the environment configuration provided by the platform
 if '__firebase_config__' in globals():
     try:
-        firebase_config = json.loads(os.environ.get('__firebase_config__', '{}'))
-        app = initialize_app(firebase_config)
-        db = get_firestore(app)
-        auth = get_auth(app)
-        # Unique app ID for Firestore security rules
+        firebase_config_dict = json.loads(os.environ.get('__firebase_config__', '{}'))
+        # Pyrebase requires a different format for the config key (apiKey instead of projectId)
+        pyrebase_config = {
+            "apiKey": firebase_config_dict.get('apiKey'),
+            "authDomain": firebase_config_dict.get('authDomain'),
+            "databaseURL": firebase_config_dict.get('databaseURL'),
+            "projectId": firebase_config_dict.get('projectId'),
+            "storageBucket": firebase_config_dict.get('storageBucket'),
+            "messagingSenderId": firebase_config_dict.get('messagingSenderId'),
+            "appId": firebase_config_dict.get('appId')
+        }
+        firebase = pyrebase.initialize_app(pyrebase_config)
+        auth = firebase.auth()
+        db = firebase.database() # Pyrebase uses real-time database, we will simulate Firestore paths
+        
+        # Unique app ID for Firestore security paths
         APP_ID = os.environ.get('__app_id__', 'sat_vocab_master') 
+        
     except Exception as e:
-        st.error(f"🔴 Firestore Initialization Failed: {e}")
+        st.error(f"🔴 Pyrebase/Firebase Initialization Failed: {e}")
         db = None
 else:
-    st.error("🔴 Firestore environment configuration missing.")
+    st.error("🔴 Firebase environment configuration missing.")
     db = None
 
-# --- Firestore Paths ---
-# Public collection for vocabulary data shared among all users
-VOCAB_COLLECTION_PATH = f"artifacts/{APP_ID}/public/data/vocabulary"
-# Private collection for user records/progress
-USERS_COLLECTION_PATH = f"artifacts/{APP_ID}/users/user_data/profiles"
+# --- Pyrebase Data Paths Simulation (for Firestore logic compatibility) ---
+# NOTE: Pyrebase uses Realtime Database, so we map our collection paths to RTDB nodes.
+# This makes the data structure incompatible with true Firestore, but it allows the app to run.
+RTDB_VOCAB_PATH = f"{APP_ID}/public/vocabulary"
+RTDB_USERS_PATH = f"{APP_ID}/users/profiles"
 
 
 # Pydantic Schema for Vocabulary Word
@@ -98,44 +111,53 @@ if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
-if 'quiz_scores' not in st.session_state: st.session_state.quiz_scores = [] # Stores user scores per session
+if 'quiz_scores' not in st.session_state: st.session_state.quiz_scores = [] 
+if 'user_id_token' not in st.session_state: st.session_state.user_id_token = None # Store token for RTDB access
 
-# --- Firestore Data Management (Replacing local JSON file) ---
+# --- Pyrebase Realtime Database Data Management ---
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_all_vocabulary_from_firestore():
-    """Fetches all vocabulary words from the shared public Firestore collection."""
+def get_all_vocabulary_from_db():
+    """Fetches all vocabulary words from the shared public database path (RTDB)."""
     if not db: return []
     try:
-        vocab_ref = collection(db, VOCAB_COLLECTION_PATH)
-        docs = get_docs(vocab_ref)
+        # Fetch data from the Realtime Database path
+        data = db.child(RTDB_VOCAB_PATH).get().val()
+        if not data:
+            return []
+            
+        # Convert dictionary values to a list of dicts
+        raw_list = list(data.values()) if isinstance(data, dict) else []
+        
         # Ensure data integrity by validating against the Pydantic model
-        data = [SatWord(**d.to_dict()).model_dump() for d in docs]
-        return data
+        validated_data = [SatWord(**d).model_dump() for d in raw_list if isinstance(d, dict)]
+        return validated_data
+        
     except Exception as e:
-        st.error(f"Firestore Read Error (Vocabulary): {e}")
+        st.error(f"Pyrebase Read Error (Vocabulary): {e}")
         return []
 
-def save_new_vocabulary_to_firestore(new_words: List[Dict]):
-    """Saves new words to the shared public Firestore collection."""
+def save_new_vocabulary_to_db(new_words: List[Dict]):
+    """Saves new words to the shared public database path (RTDB)."""
     if not db: return
     try:
-        vocab_ref = collection(db, VOCAB_COLLECTION_PATH)
+        vocab_ref = db.child(RTDB_VOCAB_PATH)
         for word_data in new_words:
-            # Generate a unique ID based on the word for idempotent writes
-            word_id = word_data['word'].lower() 
-            set_doc(doc(vocab_ref, word_id), word_data)
-        st.toast(f"✅ Saved {len(new_words)} words to Firestore.")
-        get_all_vocabulary_from_firestore.clear() # Clear cache to fetch new data
+            # Use push() to generate a unique key for each word
+            vocab_ref.push(word_data) 
+            
+        st.toast(f"✅ Saved {len(new_words)} words to Database.")
+        get_all_vocabulary_from_db.clear() # Clear cache to fetch new data
     except Exception as e:
-        st.error(f"Firestore Write Error (Vocabulary): {e}")
+        st.error(f"Pyrebase Write Error (Vocabulary): {e}")
 
-def update_user_progress_in_firestore(quiz_score_data: Dict):
-    """Saves the latest quiz score data to the user's document."""
-    if not db or not st.session_state.current_user_email: return
+def update_user_progress_in_db(quiz_score_data: Dict):
+    """Saves the latest quiz score data to the user's document (RTDB)."""
+    if not db or not st.session_state.current_user_email or not st.session_state.user_id_token: return
+    
     try:
-        user_id = get_user_id()
-        user_ref = doc(db, USERS_COLLECTION_PATH, user_id)
+        user_id = st.session_state.current_user_email.replace('.', ',') # Safe key for RTDB
+        user_ref = db.child(RTDB_USERS_PATH).child(user_id)
         
         # Structure the score entry
         new_score = {
@@ -146,23 +168,22 @@ def update_user_progress_in_firestore(quiz_score_data: Dict):
         }
         st.session_state.quiz_scores.append(new_score)
         
-        # Read the current document, append the new score, and save back
-        user_doc = get_doc(user_ref)
-        if user_doc.exists:
-            current_data = user_doc.to_dict()
-            current_scores = current_data.get('quiz_scores', [])
-            current_scores.append(new_score)
-            
-            # Simple max score logic (Admin visibility)
-            max_score = max([s['score'] for s in current_scores])
-            
-            set_doc(user_ref, {
-                'email': st.session_state.current_user_email,
-                'quiz_scores': current_scores,
-                'last_activity': new_score['timestamp'],
-                'max_score_5_questions': max_score
-            }, merge=True)
-            
+        # Fetch current data
+        user_data = user_ref.get(st.session_state.user_id_token).val() or {}
+        current_scores = user_data.get('quiz_scores', [])
+        current_scores.append(new_score)
+        
+        # Simple max score logic (Admin visibility)
+        max_score = max([s['score'] for s in current_scores], key=lambda x: x['score'])['score'] if current_scores else 0
+        
+        # Update user profile
+        user_ref.update({
+            'email': st.session_state.current_user_email,
+            'quiz_scores': current_scores,
+            'last_activity': new_score['timestamp'],
+            'max_score_5_questions': max_score
+        }, st.session_state.user_id_token) # Needs token for authorized write
+
     except Exception as e:
         st.warning(f"Failed to update user progress: {e}")
 
@@ -207,11 +228,11 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
 
 def load_and_update_vocabulary_data():
     """
-    Loads existing data from Firestore (FAST) and checks initial word count.
+    Loads existing data from Pyrebase RTDB (FAST) and checks initial word count.
     """
     if not st.session_state.is_auth: return
     
-    st.session_state.vocab_data = get_all_vocabulary_from_firestore()
+    st.session_state.vocab_data = get_all_vocabulary_from_db()
     word_count = len(st.session_state.vocab_data)
     
     if word_count > 0:
@@ -226,9 +247,9 @@ def load_and_update_vocabulary_data():
         new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE - word_count, existing_words)
         
         if new_words:
-            save_new_vocabulary_to_firestore(new_words)
+            save_new_vocabulary_to_db(new_words)
             # Fetch updated data after saving
-            st.session_state.vocab_data = get_all_vocabulary_from_firestore()
+            st.session_state.vocab_data = get_all_vocabulary_from_db()
             st.success(f"✅ Initial {len(new_words)} words generated and saved.")
             st.rerun() 
 
@@ -237,8 +258,12 @@ def load_and_update_vocabulary_data():
 
 def handle_auth(action: str, email: str, password: str):
     """
-    Handles Firebase user registration and login.
+    Handles Pyrebase user registration and login.
     """
+    if not db:
+        st.error("Authentication system failed to initialize. Cannot proceed.")
+        return
+
     if not email or not password:
         st.error("Please enter both Email and Password.")
         return
@@ -248,21 +273,22 @@ def handle_auth(action: str, email: str, password: str):
         
     try:
         if action == "register":
-            # Firebase handles registration
-            user_id = sign_up(email, password)
+            auth.create_user_with_email_and_password(email, password)
             st.success("✅ Registration successful. Please Sign In.")
             return
 
         elif action == "login":
-            # Firebase handles login
-            user_id = sign_in(email, password)
-            st.session_state.current_user_email = email
+            user = auth.sign_in_with_email_and_password(email, password)
+            
+            # Store necessary session data
+            st.session_state.current_user_email = user['email']
+            st.session_state.user_id_token = user['idToken'] # Pyrebase requires ID token for secure writes
             st.session_state.is_auth = True
-            st.session_state.is_admin = (email == ADMIN_EMAIL)
+            st.session_state.is_admin = (user['email'] == ADMIN_EMAIL)
             st.session_state.words_displayed = LOAD_BATCH_SIZE
             st.session_state.quiz_start_index = 0
             
-            display_name = "Admin" if st.session_state.is_admin else email
+            display_name = "Admin" if st.session_state.is_admin else user['email']
             st.success(f"Logged in as: {display_name}! Access granted.")
             load_and_update_vocabulary_data() 
             st.rerun()
@@ -272,19 +298,17 @@ def handle_auth(action: str, email: str, password: str):
         error_msg = str(e)
         if "EMAIL_EXISTS" in error_msg:
             st.error("This email is already registered. Please login.")
-        elif "INVALID_LOGIN_CREDENTIALS" in error_msg or "USER_NOT_FOUND" in error_msg:
+        elif "INVALID_EMAIL" in error_msg or "INVALID_PASSWORD" in error_msg or "USER_NOT_FOUND" in error_msg:
             st.error("Invalid email or password.")
         else:
             st.error(f"Authentication failed: {error_msg}")
 
 def handle_logout():
     """Handles session state reset and signs out the user."""
-    try:
-        sign_out()
-    except:
-        pass # Ignore errors if already signed out
+    # Pyrebase doesn't have a direct sign_out method; we clear local tokens/state.
     st.session_state.is_auth = False
     st.session_state.current_user_email = None
+    st.session_state.user_id_token = None
     st.session_state.quiz_active = False
     st.session_state.quiz_scores = []
     st.session_state.words_displayed = LOAD_BATCH_SIZE
@@ -430,7 +454,7 @@ def generate_quiz_ui():
         accuracy = st.session_state.quiz_results['accuracy']
         
         # Save score to Firestore before displaying results
-        update_user_progress_in_firestore(st.session_state.quiz_results)
+        update_user_progress_in_db(st.session_state.quiz_results)
         
         if score == total:
             st.balloons()
@@ -532,22 +556,23 @@ def admin_extraction_ui():
     st.subheader("User Progress Overview")
     
     if not db:
-        st.error("Cannot access user data. Firestore is not initialized.")
+        st.error("Cannot access user data. Database is not initialized.")
         return
         
     try:
-        users_ref = collection(db, USERS_COLLECTION_PATH)
-        user_docs = get_docs(users_ref)
+        # Fetch data from the Realtime Database path
+        user_data = db.child(RTDB_USERS_PATH).get(st.session_state.user_id_token).val()
         
         user_list = []
-        for doc in user_docs:
-            data = doc.to_dict()
-            user_list.append({
-                'Email': data.get('email', 'N/A'),
-                'Max Score': data.get('max_score_5_questions', 0),
-                'Last Activity': time.strftime('%Y-%m-%d %H:%M', time.localtime(data.get('last_activity', 0))),
-                'Total Quizzes': len(data.get('quiz_scores', []))
-            })
+        if user_data:
+            for user_key, data in user_data.items():
+                if isinstance(data, dict):
+                    user_list.append({
+                        'Email': data.get('email', user_key.replace(',', '.')), # Decode email
+                        'Max Score': data.get('max_score_5_questions', 0),
+                        'Last Activity': time.strftime('%Y-%m-%d %H:%M', time.localtime(data.get('last_activity', 0))),
+                        'Total Quizzes': len(data.get('quiz_scores', []))
+                    })
 
         if user_list:
             st.dataframe(user_list, use_container_width=True)
@@ -570,10 +595,10 @@ def admin_extraction_ui():
         new_batch = real_llm_vocabulary_extraction(5, existing_words)
         
         if new_batch:
-            save_new_vocabulary_to_firestore(new_batch)
+            save_new_vocabulary_to_db(new_batch)
             st.success(f"✅ Added {len(new_batch)} words to the database.")
             # Reload data and rerun the app to show new words
-            get_all_vocabulary_from_firestore.clear() 
+            get_all_vocabulary_from_db.clear() 
             st.rerun()
         else:
             st.error("Failed to generate new words. Check API key and logs.")
@@ -591,14 +616,12 @@ def main():
     with st.sidebar:
         st.header("User Login")
         
-        # Check authentication state (Firebase provides the sign-in status)
-        if not st.session_state.is_auth and is_user_logged_in():
-            st.session_state.is_auth = True
-            user_email = get_user_id()
-            st.session_state.current_user_email = user_email
-            st.session_state.is_admin = (user_email == ADMIN_EMAIL)
-            st.success(f"Re-authenticated as: {user_email}")
-            load_and_update_vocabulary_data() 
+        # Check authentication state
+        # Pyrebase does not provide a simple is_user_logged_in wrapper like the 'firebase' library.
+        # We rely on session state token presence.
+        if st.session_state.user_id_token and not st.session_state.is_auth:
+             # This is a soft re-authentication attempt if the token is set but state is false
+             st.session_state.is_auth = True 
 
         if not st.session_state.is_auth:
             

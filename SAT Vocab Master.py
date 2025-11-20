@@ -474,7 +474,8 @@ def main():
             user_input = st.text_input("📧 Email", key="user_email_input", value="jamshaid@example.com")
             password_input = st.text_input("🔑 Password", type="password", key="password_input", value="password123")
             
-            st.button("Login", on_on_click=handle_login, args=(user_input, password_input), type="primary")
+            # 🐞 FIX: Corrected typo from on_onclick to on_click
+            st.button("Login", on_click=handle_login, args=(user_input, password_input), type="primary")
             st.caption("Mock login: Just enter text in both fields to proceed.")
         else:
             st.success(f"Logged in as: **{st.session_state.current_user_id}**")

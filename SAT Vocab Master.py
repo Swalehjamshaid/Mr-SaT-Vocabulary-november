@@ -5,13 +5,13 @@ import sys
 import os
 import base64
 import urllib.parse 
-import re # 🛑 Used for cleaning the secret string
+import re 
 from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# 🟢 FINAL FIREBASE IMPORTS (Fixes 'module google.cloud.firestore has no attribute client')
+# 🟢 FINAL FIREBASE IMPORTS 
 try:
     from firebase_admin import credentials, initialize_app, firestore 
     import firebase_admin 
@@ -61,7 +61,6 @@ try:
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
 
     # 2. AGGRESSIVE CLEANING: Strip all surrounding quotes, newlines, and tabs.
-    # This prepares the raw string for JSON loading, ignoring formatting errors from the TOML editor.
     cleaned_value = secret_value.strip()
     
     # Remove surrounding triple quotes
@@ -77,10 +76,11 @@ try:
     # 🛑 FIX FOR "Invalid private key" ERROR: CLEAN THE PRIVATE KEY FIELD EXPLICITLY
     if 'private_key' in service_account_info:
         raw_key = service_account_info['private_key']
-        # Remove any unexpected spaces or tabs that corrupt the base64 string
+        
+        # Aggressively remove spaces/tabs that corrupt the base64 string
         cleaned_key = raw_key.replace(" ", "").replace("\t", "") 
         
-        # Ensure the header and footer are clean (sometimes newlines get corrupted)
+        # Ensure the header and footer are clean
         cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
         cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
         

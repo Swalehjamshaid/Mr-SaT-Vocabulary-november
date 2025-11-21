@@ -57,8 +57,10 @@ except Exception as e:
 
 # 🟢 NEW: Firestore initialization using Streamlit Secrets
 try:
-    # This key is critical for permanent storage
-    service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
+    # CRITICAL FIX: Ensure the secret value is treated as a string before loading the JSON.
+    # We strip potential quotes/whitespace if the user accidentally wrapped the JSON in quotes in secrets.
+    secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"].strip().strip('"').strip("'")
+    service_account_info = json.loads(secret_value)
     
     # Initialize Firebase Admin SDK (Only once)
     if not firebase_admin._apps:

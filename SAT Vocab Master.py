@@ -1,4 +1,3 @@
-
 import json
 import time
 import random
@@ -8,17 +7,25 @@ import base64
 import urllib.parse 
 from typing import List, Dict, Optional
 import streamlit as st
-# 🛑 REMOVING google-genai for TTS
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# 🟢 NEW: Import gTTS and io for open-source TTS solution
+# 🟢 NEW: FIREBASE IMPORTS (Admin and Firestore)
+try:
+    from google.cloud import firestore
+    from firebase_admin import credentials, initialize_app
+    import firebase_admin 
+except ImportError:
+    st.error("FIREBASE ERROR: Required libraries 'firebase-admin' and 'google-cloud-firestore' are missing in requirements.txt.")
+    st.stop()
+
+
+# 🟢 NEW: Import gTTS and io for open-source TTS solution (as requested by user)
 try:
     from gtts import gTTS
     import io
 except ImportError:
     st.error("ERROR: The 'gtts' library is required for open-source TTS.")
-    st.error("Please ensure 'gtts' is in your requirements.txt file.")
     st.stop()
     
 # --- GEMS API (Still required for text extraction) ---
@@ -26,44 +33,61 @@ try:
     from google import genai
     from google.genai import types
 except ImportError:
-    # This block is for redundancy, main error is caught by gTTS import block
     st.error("ERROR: The 'google-genai' and 'pydantic' libraries are required.")
     st.stop()
 
 
 # ======================================================================
-# *** LOCAL EXECUTION SETUP & FILE PATHS ***
+# *** FIREBASE SETUP & INITIALIZATION ***
 # ======================================================================
 
 # Check for API Key (Gemini)
 if "GEMINI_API_KEY" in os.environ:
-    # Use the API key provided in the secrets file
     api_key = os.environ["GEMINI_API_KEY"]
 else:
-    st.error("🔴 GEMINI_API_KEY is missing! Please set it in your secrets.")
+    st.error("🔴 GEMINI_API_KEY is missing! Please set it in your Streamlit Secrets.")
     st.stop()
 
 # Initialize Gemini Client
 try:
-    # We still need the Gemini client for text extraction
     gemini_client = genai.Client()
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
+# 🟢 NEW: Firestore initialization using Streamlit Secrets
+try:
+    # This key is critical for permanent storage
+    service_account_info = json.loads(os.environ["FIREBASE_SERVICE_ACCOUNT"])
+    
+    # Initialize Firebase Admin SDK (Only once)
+    if not firebase_admin._apps:
+        cred = credentials.Certificate(service_account_info)
+        initialize_app(cred)
+
+    # Initialize Firestore client
+    db = firestore.client()
+    # Define the main collection path (shared public data)
+    VOCAB_COLLECTION = db.collection("sat_vocabulary")
+    
+except KeyError:
+    st.error("🔴 FIREBASE SETUP FAILED: 'FIREBASE_SERVICE_ACCOUNT' secret not found. Data cannot be saved permanently.")
+    st.stop()
+except Exception as e:
+    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: {e}. Check service account key format.")
+    st.stop()
+
+
 # --- App State and Constants ---
-# Use a local JSON file for persistent storage
-JSON_FILE_PATH = "vocab_data.json" 
+# 🛑 REMOVED JSON_FILE_PATH
 REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
-# The target for automatic extraction is now the full 2000 words
 AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT 
 QUIZ_SIZE = 5 
 
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
 ADMIN_PASSWORD = "Jamshaid,1981" 
-# Manual extraction batch size set to 50 for the Admin button
 MANUAL_EXTRACT_BATCH = 50 
 
 
@@ -75,11 +99,12 @@ class SatWord(BaseModel):
     tip: str = Field(description="A short, catchy mnemonic memory tip.")
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
-    # The audio field now stores MP3 Base64 data from gTTS
     audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
+    # 🟢 NEW: Firestore field to ensure proper sorting
+    created_at: float = Field(default_factory=time.time)
 
 # ----------------------------------------------------------------------
-# 2. DATA PERSISTENCE & STATE MANAGEMENT (LOCAL FILE)
+# 2. DATA PERSISTENCE & STATE MANAGEMENT (FIREBASE FIRESTORE)
 # ----------------------------------------------------------------------
 
 if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
@@ -90,31 +115,48 @@ if 'words_displayed' not in st.session_state: st.session_state.words_displayed =
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
 
-def load_vocabulary_from_file():
-    """Loads vocabulary data from the local JSON file."""
-    if os.path.exists(JSON_FILE_PATH):
-        with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
-            try:
-                data = json.load(f)
-                return data if isinstance(data, list) else []
-            except json.JSONDecodeError:
-                return []
-    return []
 
-def save_vocabulary_to_file(data: List[Dict]):
-    """Saves the current vocabulary data to the local JSON file."""
-    # NOTE: This saving is unique to the server and not shared among users
+def load_vocabulary_from_firestore():
+    """Loads all vocabulary data from Firestore."""
     try:
-        with open(JSON_FILE_PATH, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4)
-    except IOError as e:
-        st.error(f"Error saving data to {JSON_FILE_PATH}: {e}")
+        # Fetch documents, ordered by creation time to maintain list order
+        docs = VOCAB_COLLECTION.order_by('created_at').stream()
+        vocab_list = [doc.to_dict() for doc in docs]
+        return vocab_list
+    except Exception as e:
+        st.error(f"🔴 Firestore Load Failed: {e}")
+        return []
+
+def save_word_to_firestore(word_data: Dict):
+    """Adds a single word document to the Firestore collection."""
+    try:
+        # Use the word itself as the document ID for easy lookup and to prevent duplicates
+        doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
+        doc_ref.set(word_data, merge=False)
+        return True
+    except Exception as e:
+        st.error(f"🔴 Firestore Save Failed for {word_data['word']}: {e}")
+        return False
+        
+def update_word_in_firestore(word_data: Dict):
+    """Updates a single word document in the Firestore collection."""
+    try:
+        doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
+        # Only update the audio field
+        doc_ref.update({
+            'audio_base64': word_data['audio_base64']
+        })
+        return True
+    except Exception as e:
+        st.error(f"🔴 Firestore Update Failed for {word_data['word']}: {e}")
+        return False
+
+
+# 🛑 DELETING load_vocabulary_from_file and save_vocabulary_to_file
 
 # ----------------------------------------------------------------------
 # 3. AI EXTRACTION & AUDIO FUNCTIONS
 # ----------------------------------------------------------------------
-
-# 🛑 DELETING pcm_to_wav because gTTS produces MP3, not raw PCM.
 
 def generate_tts_audio(text: str) -> Optional[str]:
     """Generates audio via gTTS and returns Base64 encoded MP3 data."""
@@ -132,7 +174,6 @@ def generate_tts_audio(text: str) -> Optional[str]:
         return base64_data
 
     except Exception as e:
-        # gTTS network failure will land here, showing a severe error
         print(f"gTTS Generation failed for word: {text}. Error: {e}")
         st.error(f"TTS Audio Error: {e}")
         return None
@@ -143,7 +184,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     2. Calls the gTTS library for each word to generate and encode the audio.
     """
     
-    # --- Step 1: Generate Text Data (Remains the same using gemini-2.5-flash) ---
     prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
 
     list_schema = {"type": "array", "items": SatWord.model_json_schema()}
@@ -162,13 +202,11 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     # --- Step 2: Generate and Attach Audio Data (gTTS) ---
     words_with_audio = []
     
-    # We use a progress bar for the slow step
     progress_bar = st.progress(0, text=f"Generating TTS audio for 0 of {len(validated_words)} words...")
     
     for i, word_data in enumerate(validated_words):
         word = word_data['word']
         
-        # Call the TTS function (now using gTTS)
         audio_data = generate_tts_audio(word)
         
         if audio_data:
@@ -178,16 +216,15 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
             
         words_with_audio.append(word_data)
         
-        # Update progress bar
         progress = (i + 1) / len(validated_words)
         progress_bar.progress(progress, text=f"Generating TTS audio for {i + 1} of {len(validated_words)} words...")
         
-    progress_bar.empty() # Clear progress bar on completion
+    progress_bar.empty() 
     
     return words_with_audio
 
 def handle_manual_word_entry(word: str):
-    """Generates pronunciation and LLM content for a single word and saves it."""
+    """Generates pronunciation and LLM content for a single word and saves it to Firestore."""
     
     if not word:
         st.error("Please enter a word.")
@@ -212,7 +249,6 @@ def handle_manual_word_entry(word: str):
             model="gemini-2.5-flash", contents=prompt, config=config
         )
         
-        # Parse the JSON response
         data_list = json.loads(response.text)
         if not data_list or not isinstance(data_list, list) or 'word' not in data_list[0]:
             raise ValueError("LLM returned invalid data structure.")
@@ -223,19 +259,20 @@ def handle_manual_word_entry(word: str):
         st.error(f"🔴 Failed to generate content for '{word}'. Error: {e}")
         return
 
-    # 3. Combine Data and Save
+    # 3. Combine Data and Save to FIREBASE
     new_word_data['audio_base64'] = audio_data
     
     if new_word_data['word'].lower() != word.lower():
         st.warning(f"Note: LLM corrected the word to '{new_word_data['word']}'. Using LLM's version.")
 
-    st.session_state.vocab_data.insert(0, new_word_data) # Insert at top for visibility
-    save_vocabulary_to_file(st.session_state.vocab_data)
-    st.success(f"✅ Manually added '{new_word_data['word']}' with working pronunciation!")
-    st.rerun()
+    if save_word_to_firestore(new_word_data):
+        st.success(f"✅ Manually added '{new_word_data['word']}' with working pronunciation to Firebase!")
+        st.rerun()
+    else:
+        st.error("🔴 Failed to save to Firebase.")
 
 def handle_fix_single_audio(word_index: int):
-    """Generates missing audio for a single word and saves the update."""
+    """Generates missing audio for a single word and updates the Firestore document."""
     
     if word_index < 0 or word_index >= len(st.session_state.vocab_data):
         st.error("Invalid word index.")
@@ -246,13 +283,15 @@ def handle_fix_single_audio(word_index: int):
     
     st.info(f"Attempting to fix pronunciation for '{word}'...")
     
-    # Generate the missing audio
     audio_data = generate_tts_audio(word)
     
     if audio_data:
-        st.session_state.vocab_data[word_index]['audio_base64'] = audio_data
-        save_vocabulary_to_file(st.session_state.vocab_data)
-        st.success(f"✅ Successfully fixed audio for '{word}'.")
+        # 🟢 CRITICAL: Update Firebase
+        if update_word_in_firestore({'word': word, 'audio_base64': audio_data}):
+            st.session_state.vocab_data[word_index]['audio_base64'] = audio_data
+            st.success(f"✅ Successfully fixed audio for '{word}' and saved to Firebase.")
+        else:
+            st.error(f"🔴 Audio generated, but failed to save update to Firebase for '{word}'.")
     else:
         st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
     
@@ -275,7 +314,6 @@ def handle_bulk_audio_fix():
 
     status_placeholder.info(f"Starting bulk fix for {total_count} corrupted words...")
     
-    # Note: Using st.session_state.vocab_data directly for updates
     for i, index in enumerate(words_to_fix_indices):
         word_data = st.session_state.vocab_data[index]
         word = word_data['word']
@@ -283,21 +321,23 @@ def handle_bulk_audio_fix():
         status_placeholder.progress((i + 1) / total_count, 
                                     text=f"Fixing {word}... ({i + 1}/{total_count} processed)")
 
-        # 1. Generate the missing audio (using gTTS)
         audio_data = generate_tts_audio(word)
 
         if audio_data:
-            st.session_state.vocab_data[index]['audio_base64'] = audio_data
-            fixed_count += 1
-        # If gTTS fails, we skip this word and continue to the next one
-        time.sleep(0.5) # Throttle to prevent immediate session timeout/rate limiting
+            # 🟢 CRITICAL: Update Firebase
+            if update_word_in_firestore({'word': word, 'audio_base64': audio_data}):
+                 st.session_state.vocab_data[index]['audio_base64'] = audio_data
+                 fixed_count += 1
+            else:
+                 st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
 
-    # 2. Save all successful changes in one go
+        time.sleep(0.5) 
+
+    
     if fixed_count > 0:
-        save_vocabulary_to_file(st.session_state.vocab_data)
         st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
     else:
-        st.error(f"🔴 Bulk fix attempted, but audio generation failed for all {total_count} words. Check server logs/quotas.")
+        st.error(f"🔴 Bulk fix attempted, but audio generation failed for all {total_count} words or failed to save to Firebase. Check server logs/quotas.")
         
     status_placeholder.empty()
     st.rerun()
@@ -305,8 +345,7 @@ def handle_bulk_audio_fix():
 
 def fill_missing_audio(vocab_data: List[Dict]) -> bool:
     """
-    Iterates through existing vocabulary and generates missing audio for corrupted entries.
-    Returns True if any changes were made and saved, forcing a rerun.
+    Checks for missing audio to display the correct warning/fix options.
     """
     words_to_fix = [d for d in vocab_data if d.get('audio_base64') is None]
     if not words_to_fix:
@@ -314,60 +353,66 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
 
     st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. Use the 'Fix Audio' button next to each word or the 'Bulk Fix' tool.")
     
-    return False # Do not force rerun for bulk fix anymore, let user use button
+    return False 
 
 
 def load_and_update_vocabulary_data():
     """
-    Loads existing data, checks for missing audio, and implements aggressive goal-seeking extraction.
+    Loads data from Firestore and implements aggressive goal-seeking extraction.
     """
     if not st.session_state.is_auth: return
     
-    st.session_state.vocab_data = load_vocabulary_from_file()
+    # 🟢 CRITICAL: Load from Firestore
+    st.session_state.vocab_data = load_vocabulary_from_firestore()
     
-    # 1. CONTINUOUS PRONUNCIATION CHECK: Check and display warning, but don't force bulk fix.
+    # 1. CONTINUOUS PRONUNCIATION CHECK: Check and display warning.
     fill_missing_audio(st.session_state.vocab_data)
         
     word_count = len(st.session_state.vocab_data)
     
     if word_count > 0:
-        st.info(f"✅ Loaded {word_count} words from local file.")
+        st.info(f"✅ Loaded {word_count} words from shared database (Firestore).")
     
     # 2. AGGRESSIVE WORD EXTRACTION: Fill the vocabulary up to the 2000-word target
     if word_count < AUTO_EXTRACT_TARGET_SIZE:
         words_needed = AUTO_EXTRACT_TARGET_SIZE - word_count
         
-        # Determine the number of words to extract in this single session run.
-        # We cap it at LOAD_BATCH_SIZE (10) for stability.
         num_to_extract = min(LOAD_BATCH_SIZE, words_needed)
         
         if num_to_extract > 0:
             st.warning(f"Goal: {AUTO_EXTRACT_TARGET_SIZE} words. Extracting next {num_to_extract} words now...")
             
-            # Blocking extraction 
             existing_words = [d['word'] for d in st.session_state.vocab_data]
             new_words = real_llm_vocabulary_extraction(num_to_extract, existing_words)
             
             if new_words:
-                st.session_state.vocab_data.extend(new_words)
-                save_vocabulary_to_file(st.session_state.vocab_data)
-                st.success(f"✅ Added {len(new_words)} words. Current total: {len(st.session_state.vocab_data)}.")
-                # CRITICAL: Rerun to immediately check if the goal is met or extract the next batch
+                # 🟢 CRITICAL: Save each new word to Firestore
+                successful_saves = 0
+                for word_data in new_words:
+                    if save_word_to_firestore(word_data):
+                        st.session_state.vocab_data.append(word_data)
+                        successful_saves += 1
+                        
+                st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
                 st.rerun() 
             else:
                 st.error("🔴 Failed to generate new words. Check API key and logs.")
     
-    # This block handles the very first load when word_count is 0 and no continuous extraction has run
+    # This block handles the very first load when word_count is 0 
     elif word_count < LOAD_BATCH_SIZE:
         st.warning(f"Need {LOAD_BATCH_SIZE} words for initial display. Triggering extraction...")
-        # Blocking extraction for initial display 
+        
         existing_words = [d['word'] for d in st.session_state.vocab_data]
         new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE, existing_words)
         
         if new_words:
-            st.session_state.vocab_data.extend(new_words)
-            save_vocabulary_to_file(st.session_state.vocab_data)
-            st.success(f"✅ Initial {len(new_words)} words generated and saved.")
+            successful_saves = 0
+            for word_data in new_words:
+                if save_word_to_firestore(word_data):
+                    st.session_state.vocab_data.append(word_data)
+                    successful_saves += 1
+
+            st.success(f"✅ Initial {successful_saves} words generated and saved to Firebase.")
             st.rerun()
 
 
@@ -444,7 +489,6 @@ def display_vocabulary_ui():
             pronunciation = data.get('pronunciation', 'N/A')
             tip = data.get('tip', 'N/A')
             usage = data.get('usage', 'N/A')
-            # 🟢 CHANGE: Fetch base64 audio data
             audio_base64 = data.get('audio_base64') 
             definition = data.get('definition', 'N/A')
             
@@ -717,10 +761,15 @@ def admin_extraction_ui():
         new_batch = real_llm_vocabulary_extraction(MANUAL_EXTRACT_BATCH, existing_words) 
         
         if new_batch:
-            st.session_state.vocab_data.extend(new_batch)
-            save_vocabulary_to_file(st.session_state.vocab_data)
-            st.success(f"✅ Added {len(new_batch)} words to the database.")
-            st.rerun()
+            # 🟢 CRITICAL: Save each new word to Firestore
+            successful_saves = 0
+            for word_data in new_batch:
+                if save_word_to_firestore(word_data):
+                    st.session_state.vocab_data.append(word_data)
+                    successful_saves += 1
+                    
+            st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
+            st.rerun() 
         else:
             st.error("Failed to generate new words. Check API key and logs.")
 

@@ -109,7 +109,6 @@ if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
-# 🛑 REMOVED is_extracting_background FLAG (No more automatic background loops)
 
 
 def load_vocabulary_from_firestore():
@@ -160,7 +159,6 @@ def generate_tts_audio(text: str) -> Optional[str]:
         return base64_data
 
     except Exception as e:
-        # We must print the error since st.error cannot be called inside a background task
         print(f"gTTS Generation failed for word: {text}. Error: {e}")
         return None
 
@@ -186,12 +184,18 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     words_with_audio = []
     
-    # Run TTS without Streamlit progress bars
-    for word_data in validated_words:
+    progress_bar = st.progress(0, text=f"Generating TTS audio for 0 of {len(validated_words)} words...")
+    
+    for i, word_data in enumerate(validated_words):
         word = word_data['word']
         audio_data = generate_tts_audio(word)
         word_data['audio_base64'] = audio_data if audio_data else None
         words_with_audio.append(word_data)
+        
+        progress = (i + 1) / len(validated_words)
+        progress_bar.progress(progress, text=f"Generating TTS audio for {i + 1} of {len(validated_words)} words...")
+        
+    progress_bar.empty() 
         
     return words_with_audio
 
@@ -661,9 +665,9 @@ def admin_extraction_ui():
 
     st.markdown("---")
 
-    # --- Background Extraction Control (Removed for stable instant load) ---
+    # --- Extraction Control (Manual Only) ---
     st.subheader("Extraction Control")
-    st.info("Automatic continuous extraction is disabled for instant app loading.")
+    st.info("Automatic extraction is disabled for instant app loading. Use the button below to generate data.")
     
     st.markdown("---")
     
@@ -681,7 +685,6 @@ def admin_extraction_ui():
 
 def main():
     """The main Streamlit application function."""
-    # 🟢 CRITICAL: This function must be defined before it is called below.
     st.set_page_config(page_title="AI Vocabulary Builder", layout="wide")
     st.title("🧠 AI-Powered Vocabulary Builder")
     
@@ -744,6 +747,5 @@ def main():
         with tab_admin:
             admin_extraction_ui()
 
-# 🟢 CRITICAL FIX FOR NameError: The script execution starts here.
 if __name__ == "__main__":
     main()

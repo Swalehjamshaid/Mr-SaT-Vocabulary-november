@@ -10,13 +10,14 @@ import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# 🟢 NEW: FIREBASE IMPORTS (Admin and Firestore)
+# 🟢 FINAL CORRECTED FIREBASE IMPORTS (FIXES THE 'client' ATTRIBUTE ERROR)
 try:
-    from google.cloud import firestore
-    from firebase_admin import credentials, initialize_app
+    # CRITICAL FIX: We now rely solely on the Firebase Admin SDK for the Firestore module.
+    # The conflicting import 'from google.cloud import firestore' has been removed.
+    from firebase_admin import credentials, initialize_app, firestore 
     import firebase_admin 
 except ImportError:
-    st.error("FIREBASE ERROR: Required libraries 'firebase-admin' and 'google-cloud-firestore' are missing in requirements.txt.")
+    st.error("FIREBASE ERROR: The required library 'firebase-admin' is likely missing in requirements.txt.")
     st.stop()
 
 
@@ -55,10 +56,9 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# 🟢 NEW: Firestore initialization using Streamlit Secrets
+# 🟢 FINAL FIRESTORE INITIALIZATION FIX APPLIED HERE
 try:
     # CRITICAL FIX: Ensure the secret value is treated as a string before loading the JSON.
-    # We strip potential quotes/whitespace if the user accidentally wrapped the JSON in quotes in secrets.
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"].strip().strip('"').strip("'")
     service_account_info = json.loads(secret_value)
     
@@ -67,8 +67,8 @@ try:
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
 
-    # Initialize Firestore client
-    db = firestore.client()
+    # CORRECTED LINE: This now correctly calls client() on the firebase_admin.firestore module
+    db = firestore.client() 
     # Define the main collection path (shared public data)
     VOCAB_COLLECTION = db.collection("sat_vocabulary")
     
@@ -321,20 +321,20 @@ def handle_bulk_audio_fix():
         word = word_data['word']
 
         status_placeholder.progress((i + 1) / total_count, 
-                                    text=f"Fixing {word}... ({i + 1}/{total_count} processed)")
+                                        text=f"Fixing {word}... ({i + 1}/{total_count} processed)")
 
         audio_data = generate_tts_audio(word)
 
         if audio_data:
             # 🟢 CRITICAL: Update Firebase
             if update_word_in_firestore({'word': word, 'audio_base64': audio_data}):
-                 st.session_state.vocab_data[index]['audio_base64'] = audio_data
-                 fixed_count += 1
+                st.session_state.vocab_data[index]['audio_base64'] = audio_data
+                fixed_count += 1
             else:
-                 st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
+                st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
 
         time.sleep(0.5) 
-
+    
     
     if fixed_count > 0:
         st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
@@ -451,7 +451,7 @@ def handle_auth(action: str, email: str, password: str):
     st.success(f"Logged in as: {display_name}! Access granted (Simulated).")
     load_and_update_vocabulary_data() 
     st.rerun()
-            
+             
 
 def handle_logout():
     """Handles session state reset."""
@@ -630,8 +630,8 @@ def generate_quiz_ui():
             st.markdown(f"**Correct Answer:** {result['correct_answer']}")
             
             if not result['is_correct']:
-                 st.markdown(f"**Memory Tip:** *{result['tip']}*")
-                 st.markdown(f"**Usage:** *'{result['usage']}'*")
+                st.markdown(f"**Memory Tip:** *{result['tip']}*")
+                st.markdown(f"**Usage:** *'{result['usage']}'*")
             
             st.markdown("---")
             

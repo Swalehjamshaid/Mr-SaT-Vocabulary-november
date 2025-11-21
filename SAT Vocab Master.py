@@ -12,11 +12,12 @@ from pydantic import json_schema
 
 # 🟢 FINAL CORRECTED FIREBASE IMPORTS 
 try:
-    # CRITICAL FIX: We now rely solely on the Firebase Admin SDK for the Firestore module.
-    from firebase_admin import credentials, initialize_app, firestore 
+    # CRITICAL FIX: We rely ONLY on the Firebase Admin SDK's Firestore module.
+    # The conflicting import 'from google.cloud import firestore' has been removed.
+    from firebase_admin import credentials, initialize_app, firestore
     import firebase_admin 
 except ImportError:
-    st.error("FIREBASE ERROR: The required library 'firebase-admin' is likely missing in requirements.txt.")
+    st.error("FIREBASE ERROR: Required libraries 'firebase-admin' are missing in requirements.txt.")
     st.stop()
 
 
@@ -55,7 +56,7 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# 🟢 FINAL FIRESTORE INITIALIZATION FIX APPLIED HERE
+# 🟢 FINAL FIRESTORE INITIALIZATION FIX
 try:
     # CRITICAL FIX: Ensure the secret value is treated as a string before loading the JSON.
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"].strip().strip('"').strip("'")
@@ -67,7 +68,7 @@ try:
         initialize_app(cred)
 
     # CORRECTED LINE: This now correctly calls client() on the firebase_admin.firestore module
-    db = firestore.client() 
+    db = firestore.client()
     # Define the main collection path (shared public data)
     VOCAB_COLLECTION = db.collection("sat_vocabulary")
     
@@ -359,9 +360,7 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
 
 def load_and_update_vocabulary_data():
     """
-    🟢 FINAL FIX: Loads data from Firestore and REMOVES the aggressive auto-extraction 
-    logic that caused the continuous st.rerun() loop. Extraction is now purely manual 
-    via the Admin tab buttons.
+    Loads data from Firestore and implements aggressive goal-seeking extraction.
     """
     if not st.session_state.is_auth: return
     
@@ -375,11 +374,48 @@ def load_and_update_vocabulary_data():
     
     if word_count > 0:
         st.info(f"✅ Loaded {word_count} words from shared database (Firestore).")
-    else:
-        # Stabilized message for when the DB is empty
-        st.info("Database is empty. Please log in as Admin and use the 'Data Tools' tab to extract the first batch of words.")
+    
+    # 2. AGGRESSIVE WORD EXTRACTION: Fill the vocabulary up to the 2000-word target
+    if word_count < AUTO_EXTRACT_TARGET_SIZE:
+        words_needed = AUTO_EXTRACT_TARGET_SIZE - word_count
+        
+        num_to_extract = min(LOAD_BATCH_SIZE, words_needed)
+        
+        if num_to_extract > 0:
+            st.warning(f"Goal: {AUTO_EXTRACT_TARGET_SIZE} words. Extracting next {num_to_extract} words now...")
+            
+            existing_words = [d['word'] for d in st.session_state.vocab_data]
+            new_words = real_llm_vocabulary_extraction(num_to_extract, existing_words)
+            
+            if new_words:
+                # 🟢 CRITICAL: Save each new word to Firestore
+                successful_saves = 0
+                for word_data in new_words:
+                    if save_word_to_firestore(word_data):
+                        st.session_state.vocab_data.append(word_data)
+                        successful_saves += 1
+                        
+                st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
+                st.rerun() 
+            else:
+                st.error("🔴 Failed to generate new words. Check API key and logs.")
+    
+    # This block handles the very first load when word_count is 0 
+    elif word_count < LOAD_BATCH_SIZE:
+        st.warning(f"Need {LOAD_BATCH_SIZE} words for initial display. Triggering extraction...")
+        
+        existing_words = [d['word'] for d in st.session_state.vocab_data]
+        new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE, existing_words)
+        
+        if new_words:
+            successful_saves = 0
+            for word_data in new_words:
+                if save_word_to_firestore(word_data):
+                    st.session_state.vocab_data.append(word_data)
+                    successful_saves += 1
 
-    # --- NO MORE AGGRESSIVE EXTRACTION OR ST.RERUN() CALLS HERE ---
+            st.success(f"✅ Initial {successful_saves} words generated and saved to Firebase.")
+            st.rerun()
 
 
 # --- Mock Authentication Handlers (Based on previous correct implementation) ---
@@ -440,7 +476,7 @@ def display_vocabulary_ui():
     st.header("📚 Vocabulary Display", divider="blue")
     
     if not st.session_state.vocab_data:
-        st.info("No vocabulary loaded yet. Please check the Data Tools tab to generate the first batch.")
+        st.info("No vocabulary loaded yet. Please check the data status.")
         return
 
     total_words = len(st.session_state.vocab_data)
@@ -703,10 +739,11 @@ def admin_extraction_ui():
 
     # --- User Management & Progress Tracking (MOCK) ---
     st.subheader("User Progress Overview")
+    st.warning("⚠️ User progress tracking is disabled because a reliable shared database (Firebase) could not be installed.")
     st.markdown(f"""
     **Current Admin Email:** `{ADMIN_EMAIL}`
     
-    This section is mocked but depends on a working database.
+    To implement this section, the app needs a persistent, shared backend database to track multiple users. This feature is mocked.
     """)
     st.dataframe([
         {'Email': ADMIN_EMAIL, 'Status': 'Admin/Active', 'Quizzes Done': 'N/A'},
@@ -792,7 +829,7 @@ def main():
 
         # Auto-extraction logic (non-blocking status message)
         if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
-             st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. Use the Admin 'Data Tools' tab to extract more.")
+             st.info("The vocabulary list is currently building to the target size...")
 
         # Use tabs for the main features
         tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])

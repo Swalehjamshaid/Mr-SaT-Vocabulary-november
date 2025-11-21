@@ -107,7 +107,7 @@ REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
 AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT 
 QUIZ_SIZE = 5 
-# 🟢 NEW: Auto-fetching threshold (e.g., if less than 50 words, fetch 25)
+# 🟢 Auto-fetching threshold (e.g., if less than 50 words, fetch 25)
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25 
 
@@ -392,7 +392,7 @@ def load_and_update_vocabulary_data():
     elif st.session_state.is_auth:
         st.info("Database is empty. Please use the 'Data Tools' tab to extract the first batch of words.")
 
-    # 🟢 NEW: AUTO-FETCH LOGIC FOR ADMIN
+    # 🟢 AUTO-FETCH LOGIC FOR ADMIN
     if st.session_state.is_admin and word_count < AUTO_FETCH_THRESHOLD and 'auto_fetch_done' not in st.session_state:
         # Prevents re-running, runs only once if under threshold
         handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
@@ -450,7 +450,7 @@ def go_to_prev_page():
     st.rerun()
 
 def display_vocabulary_ui():
-    """Renders the Vocabulary Display feature with Paging functionality."""
+    """Renders the Vocabulary Display feature with Paging functionality and improved styling."""
     st.header("📚 Vocabulary Display", divider="blue")
     
     if not st.session_state.vocab_data:
@@ -468,8 +468,8 @@ def display_vocabulary_ui():
     st.markdown(f"**Showing Words {start_index + 1} - {end_index} of {total_words} High-Level SAT Words**")
     
     
-    # --- WORD DISPLAY CONTAINER ---
-    with st.container(height=500, border=True):
+    # --- WORD DISPLAY CONTAINER (Removed fixed height for better vertical flow) ---
+    with st.container(border=True): 
         
         # Display the words for the current page only
         for i, data in enumerate(st.session_state.vocab_data[start_index:end_index]):
@@ -481,7 +481,7 @@ def display_vocabulary_ui():
             audio_base64 = data.get('audio_base64') 
             definition = data.get('definition', 'N/A')
             
-            expander_title = f"**{word_number}.** {word} - {pronunciation}"
+            expander_title = f"**{word_number}. {word}** — {pronunciation}" # Enhanced visual title
             
             with st.expander(expander_title):
                 
@@ -506,9 +506,9 @@ def display_vocabulary_ui():
                             type="primary"
                         )
 
-                st.markdown(f"**Definition:** {definition.capitalize()}")
-                st.markdown(f"**Memory Tip:** *{tip}*") 
-                st.markdown(f"**Usage:** *'{usage}'*")
+                st.markdown(f"**📖 Definition:** {definition.capitalize()}") 
+                st.markdown(f"**💡 Memory Tip:** *{tip}*") 
+                st.markdown(f"**🗣️ Usage:** *'{usage}'*") 
 
     # --- PAGINATION CONTROLS ---
     col_prev, col_status, col_next = st.columns([1, 2, 1])

@@ -138,6 +138,9 @@ if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'current_page_index' not in st.session_state: st.session_state.current_page_index = 0
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
+# 🟢 NEW: State for the 2-Minute Drill feature
+if 'briefing_word' not in st.session_state: st.session_state.briefing_word = None
+if 'briefing_content' not in st.session_state: st.session_state.briefing_content = None
 
 
 def load_vocabulary_from_firestore():
@@ -222,6 +225,50 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
             words_with_audio.append(word_data)
         
     return words_with_audio
+
+# 🟢 NEW FUNCTION: Generate detailed briefing for a word
+def generate_word_briefing(word_data: Dict):
+    """Generates a detailed 2-minute text briefing and its audio counterpart."""
+    word = word_data['word']
+    definition = word_data['definition']
+    
+    # Prompting for an extended, detailed briefing (approx. 200-250 words for 2 minutes)
+    prompt = f"""
+    You are a vocabulary tutor. Write a detailed, engaging, and persuasive 2-minute audio-ready briefing on the word '{word}'.
+    
+    The briefing must include:
+    1. A clear pronunciation (e.g., eh-FEM-er-al).
+    2. The core definition: {definition}.
+    3. The etymology (word origin) in simple terms.
+    4. Two distinct, complex example sentences demonstrating high-level usage.
+    5. A practical scenario where the word is essential.
+    6. A concluding summary encouraging the student to use the word.
+    
+    Ensure the entire text is conversational and suitable for speech synthesis. Do not use bullet points or lists; write it as a continuous, flowing speech.
+    """
+    
+    try:
+        with st.spinner(f"Generating 2-minute briefing text for '{word}'..."):
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt
+            )
+            briefing_text = response.text.strip()
+        
+        # --- Generate Audio for the entire briefing ---
+        with st.spinner("Generating full audio for the briefing..."):
+            audio_data = generate_tts_audio(briefing_text)
+            
+        if not audio_data:
+            raise Exception("Failed to generate TTS audio.")
+
+        return {
+            "text": briefing_text,
+            "audio_base64": audio_data
+        }
+        
+    except Exception as e:
+        st.error(f"🔴 Briefing Generation Failed for '{word}': {e}")
+        return None
 
 def handle_manual_word_entry(word: str):
     """Generates pronunciation and LLM content for a single word and saves it to Firestore."""
@@ -698,6 +745,78 @@ def generate_quiz_ui():
             del st.session_state.user_responses
             st.rerun()
 
+# 🟢 NEW UI: 2-Minute Drill feature
+def two_minute_drill_ui():
+    """Renders the UI for the 2-Minute Word Briefing feature."""
+    st.header("⏱️ 2-Minute Drill", divider="red")
+
+    if not st.session_state.vocab_data:
+        st.info("No vocabulary loaded yet. Please generate some words via the Data Tools tab.")
+        return
+
+    # --- Word Selection ---
+    word_options = [d['word'].upper() for d in st.session_state.vocab_data]
+    selected_word_str = st.selectbox(
+        "Select a word for the deep briefing:",
+        options=["Select a word..."] + word_options,
+        key="briefing_word_select"
+    )
+
+    if selected_word_str == "Select a word...":
+        st.info("Select a word to generate its detailed 2-minute briefing.")
+        st.session_state.briefing_word = None
+        st.session_state.briefing_content = None
+        return
+
+    # Find the corresponding data dictionary
+    selected_word_data = next((d for d in st.session_state.vocab_data if d['word'].upper() == selected_word_str), None)
+
+    if not selected_word_data:
+        st.error("Word data not found.")
+        return
+
+    # --- Generation Logic ---
+    
+    # Check if this word's briefing is already loaded
+    if st.session_state.briefing_word != selected_word_str or st.session_state.briefing_content is None:
+        
+        # Reset state and generate new content
+        st.session_state.briefing_word = selected_word_str
+        st.session_state.briefing_content = None # Ensure visual feedback on reload
+
+        if st.button(f"Generate Briefing for {selected_word_str}", type="primary"):
+            briefing = generate_word_briefing(selected_word_data)
+            if briefing:
+                st.session_state.briefing_content = briefing
+                st.toast(f"Briefing generated for {selected_word_str}!")
+            else:
+                st.error("Could not generate content. Check API connection.")
+            st.rerun() # Rerun to display the content
+
+    # --- Display Briefing Content ---
+    if st.session_state.briefing_content and st.session_state.briefing_word == selected_word_str:
+        briefing = st.session_state.briefing_content
+        
+        st.subheader(f"Deep Dive: {selected_word_str}")
+        
+        # Audio Player
+        if briefing['audio_base64']:
+            audio_data_url = f"data:audio/mp3;base64,{briefing['audio_base64']}"
+            audio_html = f"""
+                <audio controls autoplay style="width: 100%; margin-bottom: 15px;" src="{audio_data_url}">
+                    Your browser does not support the audio element.
+                </audio>
+            """
+            st.markdown(audio_html, unsafe_allow_html=True)
+            st.markdown("---")
+        
+        # Text Content (with improved formatting)
+        st.markdown("##### 🔊 Full Briefing Transcript")
+        st.markdown(briefing['text'])
+        
+        st.markdown("---")
+        st.info(f"The briefing is about {len(briefing['text'].split())} words long, providing a rich, 2-minute study session.")
+
 
 def admin_extraction_ui():
     """Renders the Admin Extraction and User Management feature."""
@@ -805,14 +924,22 @@ def main():
         if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
              st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. The target is {AUTO_EXTRACT_TARGET_SIZE}. Use the Admin 'Data Tools' tab to extract more.")
 
-        # Use tabs for the main features
-        tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])
+        # 🟢 UPDATED TABS: Added '2-Minute Drill' tab
+        tab_display, tab_quiz, tab_drill, tab_admin = st.tabs([
+            "📚 Vocabulary List", 
+            "📝 Quiz Section", 
+            "⏱️ 2-Minute Drill",
+            "🛠️ Data Tools"
+        ])
         
         with tab_display:
             display_vocabulary_ui()
             
         with tab_quiz:
             generate_quiz_ui()
+            
+        with tab_drill:
+            two_minute_drill_ui()
 
         with tab_admin:
             admin_extraction_ui()

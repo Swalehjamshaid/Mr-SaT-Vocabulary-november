@@ -5,6 +5,7 @@ import sys
 import os
 import base64
 import urllib.parse 
+import re # 🛑 New import for cleaning the secret string
 from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
@@ -54,11 +55,27 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# 🟢 FIRESTORE INITIALIZATION 
+# 🟢 CRITICAL FIX: AGGRESSIVE SECRET CLEANING
 try:
-    # CRITICAL FIX: Ensure the secret value is treated as a string before loading the JSON.
-    secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"].strip().strip('"').strip("'")
-    service_account_info = json.loads(secret_value)
+    # 1. Get the raw secret value (which may include unwanted characters from Streamlit's editor)
+    secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
+
+    # 2. AGGRESSIVE CLEANING: Strip all surrounding quotes (', "", """), newlines, and tabs.
+    # This prepares the raw string for JSON loading, ignoring formatting errors in the TOML editor.
+    cleaned_value = secret_value.strip()
+    
+    # Remove surrounding triple quotes
+    if cleaned_value.startswith('"""') and cleaned_value.endswith('"""'):
+        cleaned_value = cleaned_value[3:-3].strip()
+
+    # Remove ALL newlines and tabs from the middle of the string
+    cleaned_value = cleaned_value.replace('\n', '').replace('\r', '').replace('\t', '')
+    
+    # Final strip of any remaining single/double quotes or whitespace on the ends
+    cleaned_value = cleaned_value.strip().strip("'").strip('"')
+
+    # 3. Attempt to load the cleaned string as JSON
+    service_account_info = json.loads(cleaned_value)
     
     # Initialize Firebase Admin SDK (Only once)
     if not firebase_admin._apps:
@@ -72,6 +89,8 @@ except KeyError:
     st.error("🔴 FIREBASE SETUP FAILED: 'FIREBASE_SERVICE_ACCOUNT' secret not found. Data cannot be saved permanently.")
     st.stop()
 except Exception as e:
+    # This will now report a cleaner error if the JSON structure itself is wrong,
+    # but should skip the 'Invalid control character' error.
     st.error(f"🔴 FIREBASE INITIALIZATION FAILED: {e}. Check service account key format.")
     st.stop()
 
@@ -347,8 +366,7 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
 
 def load_and_update_vocabulary_data():
     """
-    CRITICAL FIX: This function is now fully passive and only loads existing data.
-    The app will load instantly because no slow AI tasks run here.
+    This function is fully passive and only loads existing data, ensuring instant loading.
     """
     if not st.session_state.is_auth: return
     

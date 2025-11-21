@@ -5,13 +5,13 @@ import sys
 import os
 import base64
 import urllib.parse 
-import re # 🛑 New import for cleaning the secret string
+import re # 🛑 Used for cleaning the secret string
 from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# 🟢 FIREBASE IMPORTS 
+# 🟢 FINAL FIREBASE IMPORTS (Fixes 'module google.cloud.firestore has no attribute client')
 try:
     from firebase_admin import credentials, initialize_app, firestore 
     import firebase_admin 
@@ -20,7 +20,7 @@ except ImportError:
     st.stop()
 
 
-# 🟢 NEW: Import gTTS and io for open-source TTS solution 
+# 🟢 Import gTTS and io 
 try:
     from gtts import gTTS
     import io
@@ -55,12 +55,13 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# 🟢 CRITICAL FIX: AGGRESSIVE SECRET CLEANING AND PRIVATE KEY REPLACEMENT
+# 🟢 CRITICAL FIX: AGGRESSIVE SECRET CLEANING
 try:
     # 1. Get the raw secret value (which may include unwanted characters from Streamlit's editor)
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
 
     # 2. AGGRESSIVE CLEANING: Strip all surrounding quotes, newlines, and tabs.
+    # This prepares the raw string for JSON loading, ignoring formatting errors from the TOML editor.
     cleaned_value = secret_value.strip()
     
     # Remove surrounding triple quotes
@@ -73,20 +74,17 @@ try:
     # 3. Attempt to load the cleaned string as JSON
     service_account_info = json.loads(cleaned_value)
     
-    # 🛑 THE FIX: CLEAN THE PRIVATE KEY FIELD EXPLICITLY
-    # This removes rogue spaces, newlines, and tabs from the private key string itself,
-    # which is the only thing that causes the "Invalid private key" error.
+    # 🛑 FIX FOR "Invalid private key" ERROR: CLEAN THE PRIVATE KEY FIELD EXPLICITLY
     if 'private_key' in service_account_info:
         raw_key = service_account_info['private_key']
-        # Replace literal newlines/spaces/tabs with the expected '\n' escape sequence
-        # We must use regex to ensure all whitespace inside the key is converted back to \n
-        cleaned_key = raw_key.replace(" ", "").replace("\t", "") # Remove spaces/tabs
+        # Remove any unexpected spaces or tabs that corrupt the base64 string
+        cleaned_key = raw_key.replace(" ", "").replace("\t", "") 
         
-        # Ensure the header and footer are clean
+        # Ensure the header and footer are clean (sometimes newlines get corrupted)
         cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
         cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
         
-        # Replace the key in the loaded dictionary
+        # Re-insert the cleaned key into the dictionary
         service_account_info['private_key'] = cleaned_key
 
     # 4. Initialize Firebase Admin SDK
@@ -102,6 +100,7 @@ except KeyError:
     st.error("🔴 FIREBASE SETUP FAILED: 'FIREBASE_SERVICE_ACCOUNT' secret not found. Data cannot be saved permanently.")
     st.stop()
 except Exception as e:
+    # This captures the persistent 'Invalid control character' and 'Invalid private key' errors
     st.error(f"🔴 FIREBASE INITIALIZATION FAILED: {e}. Check service account key format.")
     st.stop()
 

@@ -10,10 +10,9 @@ import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# 🟢 FINAL CORRECTED FIREBASE IMPORTS (FIXES THE 'client' ATTRIBUTE ERROR)
+# 🟢 FINAL CORRECTED FIREBASE IMPORTS 
 try:
     # CRITICAL FIX: We now rely solely on the Firebase Admin SDK for the Firestore module.
-    # The conflicting 'from google.cloud import firestore' has been removed.
     from firebase_admin import credentials, initialize_app, firestore 
     import firebase_admin 
 except ImportError:
@@ -377,11 +376,10 @@ def load_and_update_vocabulary_data():
     if word_count > 0:
         st.info(f"✅ Loaded {word_count} words from shared database (Firestore).")
     else:
-        st.info("Database is empty. Use the 'Data Tools' tab to manually extract the first batch of words.")
-    
-    # --- REMOVED AGGRESSIVE AUTO-EXTRACTION LOGIC ---
-    # The code blocks that checked word_count < AUTO_EXTRACT_TARGET_SIZE 
-    # and called st.rerun() have been removed to prevent the endless loop.
+        # Stabilized message for when the DB is empty
+        st.info("Database is empty. Please log in as Admin and use the 'Data Tools' tab to extract the first batch of words.")
+
+    # --- NO MORE AGGRESSIVE EXTRACTION OR ST.RERUN() CALLS HERE ---
 
 
 # --- Mock Authentication Handlers (Based on previous correct implementation) ---
@@ -708,7 +706,7 @@ def admin_extraction_ui():
     st.markdown(f"""
     **Current Admin Email:** `{ADMIN_EMAIL}`
     
-    To implement this section, the app needs a persistent, shared backend database to track multiple users. This feature is mocked.
+    This section is mocked but depends on a working database.
     """)
     st.dataframe([
         {'Email': ADMIN_EMAIL, 'Status': 'Admin/Active', 'Quizzes Done': 'N/A'},
@@ -794,7 +792,7 @@ def main():
 
         # Auto-extraction logic (non-blocking status message)
         if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
-             st.info("The vocabulary list is currently building to the target size...")
+             st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. Use the Admin 'Data Tools' tab to extract more.")
 
         # Use tabs for the main features
         tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])

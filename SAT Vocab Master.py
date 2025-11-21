@@ -73,24 +73,21 @@ try:
     # 3. Attempt to load the cleaned string as JSON
     service_account_info = json.loads(cleaned_value)
     
-    # 🛑 THE FINAL FIX: SAFELY CLEAN THE PRIVATE KEY FIELD
+    # 🛑 SAFE FIX FOR "Invalid private key" ERROR
     if 'private_key' in service_account_info:
         raw_key = service_account_info['private_key']
         
-        # 🟢 NEW SAFE CLEANING: We only strip *surrounding* whitespace and fix header spacing, 
-        # allowing the Base64 content to remain intact.
+        # Only strip surrounding whitespace and fix header spacing
         cleaned_key = raw_key.strip()
         
         # Ensure the header and footer are correctly formatted (with spaces)
         cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
         cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
         
-        # Re-insert the cleaned key into the dictionary
         service_account_info['private_key'] = cleaned_key
 
     # 4. Initialize Firebase Admin SDK
     if not firebase_admin._apps:
-        # This will now use the safely cleaned key
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
 
@@ -110,6 +107,9 @@ REQUIRED_WORD_COUNT = 2000
 LOAD_BATCH_SIZE = 10 
 AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT 
 QUIZ_SIZE = 5 
+# 🟢 NEW: Auto-fetching threshold (e.g., if less than 50 words, fetch 25)
+AUTO_FETCH_THRESHOLD = 50 
+AUTO_FETCH_BATCH = 25 
 
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
@@ -135,7 +135,7 @@ if 'current_user_email' not in st.session_state: st.session_state.current_user_e
 if 'is_auth' not in st.session_state: st.session_state.is_auth = False
 if 'vocab_data' not in st.session_state: st.session_state.vocab_data = []
 if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
-if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
+if 'current_page_index' not in st.session_state: st.session_state.current_page_index = 0
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
 
@@ -213,18 +213,13 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     words_with_audio = []
     
-    progress_bar = st.progress(0, text=f"Generating TTS audio for 0 of {len(validated_words)} words...")
-    
-    for i, word_data in enumerate(validated_words):
-        word = word_data['word']
-        audio_data = generate_tts_audio(word)
-        word_data['audio_base64'] = audio_data if audio_data else None
-        words_with_audio.append(word_data)
-        
-        progress = (i + 1) / len(validated_words)
-        progress_bar.progress(progress, text=f"Generating TTS audio for {i + 1} of {len(validated_words)} words...")
-        
-    progress_bar.empty() 
+    # Use st.spinner for a single operation outside the extraction loop for simplicity
+    with st.spinner(f"Generating audio and saving {len(validated_words)} words..."):
+        for word_data in validated_words:
+            word = word_data['word']
+            audio_data = generate_tts_audio(word)
+            word_data['audio_base64'] = audio_data if audio_data else None
+            words_with_audio.append(word_data)
         
     return words_with_audio
 
@@ -315,23 +310,20 @@ def handle_bulk_audio_fix():
 
     status_placeholder.info(f"Starting bulk fix for {total_count} corrupted words...")
     
-    for i, index in enumerate(words_to_fix_indices):
-        word_data = st.session_state.vocab_data[index]
-        word = word_data['word']
-
-        status_placeholder.progress((i + 1) / total_count, 
-                                        text=f"Fixing {word}... ({i + 1}/{total_count} processed)")
-
-        audio_data = generate_tts_audio(word)
-
-        if audio_data:
-            if update_word_in_firestore({'word': word, 'audio_base64': audio_data}):
-                st.session_state.vocab_data[index]['audio_base64'] = audio_data
-                fixed_count += 1
-            else:
-                st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
-
-        time.sleep(0.5) 
+    with st.spinner("Processing audio fix... this may take a moment."):
+        for i, index in enumerate(words_to_fix_indices):
+            word_data = st.session_state.vocab_data[index]
+            word = word_data['word']
+    
+            audio_data = generate_tts_audio(word)
+    
+            if audio_data:
+                if update_word_in_firestore({'word': word, 'audio_base64': audio_data}):
+                    st.session_state.vocab_data[index]['audio_base64'] = audio_data
+                    fixed_count += 1
+                else:
+                    st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
+            time.sleep(0.1) # Prevents hitting API limits too fast
     
     
     if fixed_count > 0:
@@ -342,9 +334,15 @@ def handle_bulk_audio_fix():
     status_placeholder.empty()
     st.rerun()
 
-def handle_admin_extraction_button(num_words: int):
-    """Handles the bulk 50 word manual extraction."""
-    st.info(f"Manually extracting {num_words} new words...")
+def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
+    """Handles the bulk word extraction (manual or auto-triggered)."""
+    
+    if auto_fetch:
+        status_message = f"Automatically extracting {num_words} new words (Admin Only)..."
+    else:
+        status_message = f"Manually extracting {num_words} new words..."
+
+    st.info(status_message)
     
     existing_words = [d['word'] for d in st.session_state.vocab_data]
     
@@ -358,10 +356,13 @@ def handle_admin_extraction_button(num_words: int):
                 st.session_state.vocab_data.append(word_data)
                 successful_saves += 1
                 
-        st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
+        if not auto_fetch:
+            st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
+        st.session_state.auto_fetch_done = True
         st.rerun() 
     else:
-        st.error("🔴 Failed to generate new words. Check API key and logs.")
+        if not auto_fetch:
+            st.error("🔴 Failed to generate new words. Check API key and logs.")
 
 def fill_missing_audio(vocab_data: List[Dict]) -> bool:
     """Checks for missing audio to display the correct warning/fix options."""
@@ -376,7 +377,7 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
 
 def load_and_update_vocabulary_data():
     """
-    This function is fully passive and only loads existing data, ensuring instant loading.
+    Loads data and manages the auto-fetch process for the Admin user.
     """
     if not st.session_state.is_auth: return
     
@@ -391,7 +392,10 @@ def load_and_update_vocabulary_data():
     elif st.session_state.is_auth:
         st.info("Database is empty. Please use the 'Data Tools' tab to extract the first batch of words.")
 
-    # --- NO AUTOMATIC EXTRACTION OR ST.RERUN() CALLS HERE ---
+    # 🟢 NEW: AUTO-FETCH LOGIC FOR ADMIN
+    if st.session_state.is_admin and word_count < AUTO_FETCH_THRESHOLD and 'auto_fetch_done' not in st.session_state:
+        # Prevents re-running, runs only once if under threshold
+        handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
 
 
 def handle_auth(action: str, email: str, password: str):
@@ -411,8 +415,9 @@ def handle_auth(action: str, email: str, password: str):
     st.session_state.current_user_email = email
     st.session_state.is_auth = True
     st.session_state.is_admin = is_admin
-    st.session_state.words_displayed = LOAD_BATCH_SIZE
+    st.session_state.current_page_index = 0 # Reset word display page
     st.session_state.quiz_start_index = 0
+    st.session_state.auto_fetch_done = False # Reset auto-fetch flag
     
     display_name = "Admin" if is_admin else email
     st.success(f"Logged in as: {display_name}! Access granted (Simulated).")
@@ -426,20 +431,26 @@ def handle_logout():
     st.session_state.current_user_email = None
     st.session_state.quiz_active = False
     st.session_state.is_admin = False
-    st.session_state.words_displayed = LOAD_BATCH_SIZE
+    st.session_state.current_page_index = 0
+    st.session_state.auto_fetch_done = False
     st.rerun()
 
 # ----------------------------------------------------------------------
 # 4. UI COMPONENTS: VOCABULARY, QUIZ, ADMIN
 # ----------------------------------------------------------------------
 
-def load_more_words():
-    """Increments the displayed word count."""
-    st.session_state.words_displayed += LOAD_BATCH_SIZE
+def go_to_next_page():
+    """Advances the displayed word page index."""
+    st.session_state.current_page_index += 1
+    st.rerun()
+
+def go_to_prev_page():
+    """Decrements the displayed word page index."""
+    st.session_state.current_page_index -= 1
     st.rerun()
 
 def display_vocabulary_ui():
-    """Renders the Vocabulary Display feature with Load More functionality."""
+    """Renders the Vocabulary Display feature with Paging functionality."""
     st.header("📚 Vocabulary Display", divider="blue")
     
     if not st.session_state.vocab_data:
@@ -447,13 +458,22 @@ def display_vocabulary_ui():
         return
 
     total_words = len(st.session_state.vocab_data)
-    words_to_show = min(total_words, st.session_state.words_displayed)
     
-    st.markdown(f"**Showing {words_to_show} of {total_words} High-Level SAT Words**")
+    # Calculate start and end indices for the current page
+    start_index = st.session_state.current_page_index * LOAD_BATCH_SIZE
+    end_index = min(start_index + LOAD_BATCH_SIZE, total_words)
     
+    words_to_show = end_index - start_index
+    
+    st.markdown(f"**Showing Words {start_index + 1} - {end_index} of {total_words} High-Level SAT Words**")
+    
+    
+    # --- WORD DISPLAY CONTAINER ---
     with st.container(height=500, border=True):
-        for i, data in enumerate(st.session_state.vocab_data[:words_to_show]):
-            word_number = i + 1 
+        
+        # Display the words for the current page only
+        for i, data in enumerate(st.session_state.vocab_data[start_index:end_index]):
+            word_number = start_index + i + 1 
             word = data.get('word', 'N/A').upper()
             pronunciation = data.get('pronunciation', 'N/A')
             tip = data.get('tip', 'N/A')
@@ -480,9 +500,9 @@ def display_vocabulary_ui():
                     if st.session_state.is_admin:
                         st.button(
                             f"Fix Audio for #{word_number}", 
-                            key=f"fix_audio_{i}", 
+                            key=f"fix_audio_{start_index + i}", 
                             on_click=handle_fix_single_audio, 
-                            args=(i,),
+                            args=(start_index + i,),
                             type="primary"
                         )
 
@@ -490,9 +510,26 @@ def display_vocabulary_ui():
                 st.markdown(f"**Memory Tip:** *{tip}*") 
                 st.markdown(f"**Usage:** *'{usage}'*")
 
-    if words_to_show < total_words:
-        if st.button(f"Load {LOAD_BATCH_SIZE} More Words", on_click=load_more_words, type="secondary"):
-            pass
+    # --- PAGINATION CONTROLS ---
+    col_prev, col_status, col_next = st.columns([1, 2, 1])
+    
+    # Previous Button
+    with col_prev:
+        if st.session_state.current_page_index > 0:
+            st.button("⬅️ Previous 10 Words", on_click=go_to_prev_page)
+    
+    # Status
+    with col_status:
+        # Displaying the current page number
+        current_page = st.session_state.current_page_index + 1
+        total_pages = (total_words + LOAD_BATCH_SIZE - 1) // LOAD_BATCH_SIZE
+        st.markdown(f"<div style='text-align: center; padding-top: 10px;'>Page {current_page} of {total_pages}</div>", unsafe_allow_html=True)
+
+    # Next Button
+    with col_next:
+        if end_index < total_words:
+            st.button("Next 10 Words ➡️", on_click=go_to_next_page, type="secondary")
+
 
 def start_new_quiz():
     """Initializes the quiz based only on the currently displayed words in sequential order."""
@@ -695,8 +732,13 @@ def admin_extraction_ui():
 
     # --- Extraction Control (Manual Only) ---
     st.subheader("Extraction Control")
-    st.info("Automatic extraction is disabled for instant app loading. Use the button below to generate data.")
     
+    # Check if auto-fetch is done or not needed
+    if len(st.session_state.vocab_data) >= AUTO_FETCH_THRESHOLD:
+        st.success(f"Database contains {len(st.session_state.vocab_data)} words. Auto-fetch is not needed.")
+    else:
+        st.info(f"Database contains {len(st.session_state.vocab_data)} words. Automatically fetching new words will trigger if the count is below the threshold ({AUTO_FETCH_THRESHOLD}).")
+
     st.markdown("---")
     
     # --- Manual Extraction Override (Admin Only) ---
@@ -704,7 +746,7 @@ def admin_extraction_ui():
     st.markdown(f"**Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).")
 
     if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): 
-        handle_admin_extraction_button(MANUAL_EXTRACT_BATCH)
+        handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False)
 
 
 # ----------------------------------------------------------------------
@@ -761,7 +803,7 @@ def main():
 
         # Non-blocking status message
         if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
-             st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. Use the Admin 'Data Tools' tab to extract more.")
+             st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. The target is {AUTO_EXTRACT_TARGET_SIZE}. Use the Admin 'Data Tools' tab to extract more.")
 
         # Use tabs for the main features
         tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])

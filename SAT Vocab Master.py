@@ -771,7 +771,7 @@ def admin_extraction_ui():
             st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
             st.rerun() 
         else:
-            st.error("Failed to generate new words. Check API key and logs.")
+            st.error("🔴 Failed to generate new words. Check API key and logs.")
 
 # ----------------------------------------------------------------------
 # 5. STREAMLIT APPLICATION STRUCTURE

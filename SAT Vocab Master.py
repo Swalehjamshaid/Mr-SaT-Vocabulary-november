@@ -13,7 +13,7 @@ from pydantic import json_schema
 # 🟢 FINAL CORRECTED FIREBASE IMPORTS (FIXES THE 'client' ATTRIBUTE ERROR)
 try:
     # CRITICAL FIX: We now rely solely on the Firebase Admin SDK for the Firestore module.
-    # The conflicting import 'from google.cloud import firestore' has been removed.
+    # The conflicting 'from google.cloud import firestore' has been removed.
     from firebase_admin import credentials, initialize_app, firestore 
     import firebase_admin 
 except ImportError:
@@ -360,7 +360,9 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
 
 def load_and_update_vocabulary_data():
     """
-    Loads data from Firestore and implements aggressive goal-seeking extraction.
+    🟢 FINAL FIX: Loads data from Firestore and REMOVES the aggressive auto-extraction 
+    logic that caused the continuous st.rerun() loop. Extraction is now purely manual 
+    via the Admin tab buttons.
     """
     if not st.session_state.is_auth: return
     
@@ -374,48 +376,12 @@ def load_and_update_vocabulary_data():
     
     if word_count > 0:
         st.info(f"✅ Loaded {word_count} words from shared database (Firestore).")
+    else:
+        st.info("Database is empty. Use the 'Data Tools' tab to manually extract the first batch of words.")
     
-    # 2. AGGRESSIVE WORD EXTRACTION: Fill the vocabulary up to the 2000-word target
-    if word_count < AUTO_EXTRACT_TARGET_SIZE:
-        words_needed = AUTO_EXTRACT_TARGET_SIZE - word_count
-        
-        num_to_extract = min(LOAD_BATCH_SIZE, words_needed)
-        
-        if num_to_extract > 0:
-            st.warning(f"Goal: {AUTO_EXTRACT_TARGET_SIZE} words. Extracting next {num_to_extract} words now...")
-            
-            existing_words = [d['word'] for d in st.session_state.vocab_data]
-            new_words = real_llm_vocabulary_extraction(num_to_extract, existing_words)
-            
-            if new_words:
-                # 🟢 CRITICAL: Save each new word to Firestore
-                successful_saves = 0
-                for word_data in new_words:
-                    if save_word_to_firestore(word_data):
-                        st.session_state.vocab_data.append(word_data)
-                        successful_saves += 1
-                        
-                st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
-                st.rerun() 
-            else:
-                st.error("🔴 Failed to generate new words. Check API key and logs.")
-    
-    # This block handles the very first load when word_count is 0 
-    elif word_count < LOAD_BATCH_SIZE:
-        st.warning(f"Need {LOAD_BATCH_SIZE} words for initial display. Triggering extraction...")
-        
-        existing_words = [d['word'] for d in st.session_state.vocab_data]
-        new_words = real_llm_vocabulary_extraction(LOAD_BATCH_SIZE, existing_words)
-        
-        if new_words:
-            successful_saves = 0
-            for word_data in new_words:
-                if save_word_to_firestore(word_data):
-                    st.session_state.vocab_data.append(word_data)
-                    successful_saves += 1
-
-            st.success(f"✅ Initial {successful_saves} words generated and saved to Firebase.")
-            st.rerun()
+    # --- REMOVED AGGRESSIVE AUTO-EXTRACTION LOGIC ---
+    # The code blocks that checked word_count < AUTO_EXTRACT_TARGET_SIZE 
+    # and called st.rerun() have been removed to prevent the endless loop.
 
 
 # --- Mock Authentication Handlers (Based on previous correct implementation) ---
@@ -476,7 +442,7 @@ def display_vocabulary_ui():
     st.header("📚 Vocabulary Display", divider="blue")
     
     if not st.session_state.vocab_data:
-        st.info("No vocabulary loaded yet. Please check the data status.")
+        st.info("No vocabulary loaded yet. Please check the Data Tools tab to generate the first batch.")
         return
 
     total_words = len(st.session_state.vocab_data)
@@ -739,7 +705,6 @@ def admin_extraction_ui():
 
     # --- User Management & Progress Tracking (MOCK) ---
     st.subheader("User Progress Overview")
-    st.warning("⚠️ User progress tracking is disabled because a reliable shared database (Firebase) could not be installed.")
     st.markdown(f"""
     **Current Admin Email:** `{ADMIN_EMAIL}`
     

@@ -55,30 +55,43 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# 🟢 CRITICAL FIX: AGGRESSIVE SECRET CLEANING
+# 🟢 CRITICAL FIX: AGGRESSIVE SECRET CLEANING AND PRIVATE KEY REPLACEMENT
 try:
     # 1. Get the raw secret value (which may include unwanted characters from Streamlit's editor)
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
 
-    # 2. AGGRESSIVE CLEANING: Strip all surrounding quotes (', "", """), newlines, and tabs.
-    # This prepares the raw string for JSON loading, ignoring formatting errors in the TOML editor.
+    # 2. AGGRESSIVE CLEANING: Strip all surrounding quotes, newlines, and tabs.
     cleaned_value = secret_value.strip()
     
     # Remove surrounding triple quotes
     if cleaned_value.startswith('"""') and cleaned_value.endswith('"""'):
         cleaned_value = cleaned_value[3:-3].strip()
 
-    # Remove ALL newlines and tabs from the middle of the string
-    cleaned_value = cleaned_value.replace('\n', '').replace('\r', '').replace('\t', '')
-    
     # Final strip of any remaining single/double quotes or whitespace on the ends
     cleaned_value = cleaned_value.strip().strip("'").strip('"')
 
     # 3. Attempt to load the cleaned string as JSON
     service_account_info = json.loads(cleaned_value)
     
-    # Initialize Firebase Admin SDK (Only once)
+    # 🛑 THE FIX: CLEAN THE PRIVATE KEY FIELD EXPLICITLY
+    # This removes rogue spaces, newlines, and tabs from the private key string itself,
+    # which is the only thing that causes the "Invalid private key" error.
+    if 'private_key' in service_account_info:
+        raw_key = service_account_info['private_key']
+        # Replace literal newlines/spaces/tabs with the expected '\n' escape sequence
+        # We must use regex to ensure all whitespace inside the key is converted back to \n
+        cleaned_key = raw_key.replace(" ", "").replace("\t", "") # Remove spaces/tabs
+        
+        # Ensure the header and footer are clean
+        cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
+        cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
+        
+        # Replace the key in the loaded dictionary
+        service_account_info['private_key'] = cleaned_key
+
+    # 4. Initialize Firebase Admin SDK
     if not firebase_admin._apps:
+        # This will now use the aggressively cleaned key
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
 
@@ -89,8 +102,6 @@ except KeyError:
     st.error("🔴 FIREBASE SETUP FAILED: 'FIREBASE_SERVICE_ACCOUNT' secret not found. Data cannot be saved permanently.")
     st.stop()
 except Exception as e:
-    # This will now report a cleaner error if the JSON structure itself is wrong,
-    # but should skip the 'Invalid control character' error.
     st.error(f"🔴 FIREBASE INITIALIZATION FAILED: {e}. Check service account key format.")
     st.stop()
 

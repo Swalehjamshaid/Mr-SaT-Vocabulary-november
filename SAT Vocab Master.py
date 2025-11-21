@@ -10,7 +10,7 @@ import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# 🟢 FINAL CORRECTED FIREBASE IMPORTS 
+# 🟢 FINAL CORRECTED FIREBASE IMPORTS (Requires 'firebase-admin' in requirements.txt)
 try:
     from firebase_admin import credentials, initialize_app, firestore 
     import firebase_admin 
@@ -19,7 +19,7 @@ except ImportError:
     st.stop()
 
 
-# 🟢 NEW: Import gTTS and io for open-source TTS solution (as requested by user)
+# 🟢 NEW: Import gTTS and io for open-source TTS solution (Requires 'gTTS' in requirements.txt)
 try:
     from gtts import gTTS
     import io
@@ -27,7 +27,7 @@ except ImportError:
     st.error("ERROR: The 'gtts' library is required for open-source TTS.")
     st.stop()
     
-# --- GEMS API (Still required for text extraction) ---
+# --- GEMS API (Requires 'google-genai' and 'pydantic' in requirements.txt) ---
 try:
     from google import genai
     from google.genai import types
@@ -56,14 +56,18 @@ except Exception as e:
 
 # 🟢 FINAL FIRESTORE INITIALIZATION FIX APPLIED HERE
 try:
+    # CRITICAL FIX: Ensure the secret value is treated as a string before loading the JSON.
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"].strip().strip('"').strip("'")
     service_account_info = json.loads(secret_value)
     
+    # Initialize Firebase Admin SDK (Only once)
     if not firebase_admin._apps:
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
 
+    # CORRECTED LINE: This now correctly calls client() on the firebase_admin.firestore module
     db = firestore.client() 
+    # Define the main collection path (shared public data)
     VOCAB_COLLECTION = db.collection("sat_vocabulary")
     
 except KeyError:
@@ -94,6 +98,7 @@ class SatWord(BaseModel):
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
     audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
+    # 🟢 NEW: Firestore field to ensure proper sorting
     created_at: float = Field(default_factory=time.time)
 
 # ----------------------------------------------------------------------
@@ -291,10 +296,47 @@ def load_and_update_vocabulary_data():
     if st.session_state.is_extracting_background and st.session_state.is_admin:
         run_background_extraction() 
 
+def handle_auth(action: str, email: str, password: str):
+    """
+    Handles Mock user registration and login.
+    """
+    if not email or not password:
+        st.error("Please enter both Email and Password.")
+        return
+        
+    # 1. Admin Login Check
+    if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
+        is_admin = True
+        
+    # 2. General User Login Check (Simple Format Validation)
+    elif len(password) >= 6 and '@' in email and '.' in email:
+        is_admin = False
+    
+    else:
+        st.error("Invalid credentials. Registration/Login requires a valid email and 6+ character password.")
+        return
 
-# --- Authentication and other functions remain the same (omitted for brevity) ---
-# ... (handle_auth, handle_logout, load_more_words, display_vocabulary_ui, etc.)
-# Note: These functions are in the full code below.
+    # Login/Register Success
+    st.session_state.current_user_email = email
+    st.session_state.is_auth = True
+    st.session_state.is_admin = is_admin
+    st.session_state.words_displayed = LOAD_BATCH_SIZE
+    st.session_state.quiz_start_index = 0
+    
+    display_name = "Admin" if is_admin else email
+    st.success(f"Logged in as: {display_name}! Access granted (Simulated).")
+    load_and_update_vocabulary_data() 
+    st.rerun()
+             
+
+def handle_logout():
+    """Handles session state reset."""
+    st.session_state.is_auth = False
+    st.session_state.current_user_email = None
+    st.session_state.quiz_active = False
+    st.session_state.is_admin = False
+    st.session_state.words_displayed = LOAD_BATCH_SIZE
+    st.rerun()
 
 # ----------------------------------------------------------------------
 # 4. UI COMPONENTS: VOCABULARY, QUIZ, ADMIN
@@ -586,6 +628,7 @@ def admin_extraction_ui():
 
 def main():
     """The main Streamlit application function."""
+    # 🟢 CRITICAL: This function must be defined before it is called below.
     st.set_page_config(page_title="AI Vocabulary Builder", layout="wide")
     st.title("🧠 AI-Powered Vocabulary Builder")
     
@@ -631,14 +674,11 @@ def main():
         # Load data on successful login 
         if not st.session_state.vocab_data:
             load_and_update_vocabulary_data() 
-            
-        # 🛑 CRITICAL: RUN BACKGROUND EXTRACTION HERE (INSTANT LOAD FIX)
-        # This function runs the slow part but allows the UI below to load instantly.
-        if st.session_state.is_admin and st.session_state.is_extracting_background:
-            run_background_extraction()
-        elif st.session_state.is_admin and len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
+
+        # Auto-extraction logic (non-blocking status message)
+        if st.session_state.is_admin and len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
              st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. Start the background extraction in 'Data Tools' to build the list.")
-        
+
         # Use tabs for the main features
         tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])
         
@@ -651,5 +691,6 @@ def main():
         with tab_admin:
             admin_extraction_ui()
 
+# 🟢 CRITICAL FIX FOR NameError: The script execution starts here.
 if __name__ == "__main__":
     main()

@@ -1,4 +1,6 @@
 streamlit
 pydantic
 google-genai
-gTTS
+gtts
+firebase-admin
+google-cloud-firestore

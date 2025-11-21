@@ -10,7 +10,7 @@ import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# 🟢 FINAL CORRECTED FIREBASE IMPORTS (Requires 'firebase-admin' in requirements.txt)
+# 🟢 FIREBASE IMPORTS 
 try:
     from firebase_admin import credentials, initialize_app, firestore 
     import firebase_admin 
@@ -19,7 +19,7 @@ except ImportError:
     st.stop()
 
 
-# 🟢 NEW: Import gTTS and io for open-source TTS solution (Requires 'gTTS' in requirements.txt)
+# 🟢 NEW: Import gTTS and io for open-source TTS solution 
 try:
     from gtts import gTTS
     import io
@@ -27,7 +27,7 @@ except ImportError:
     st.error("ERROR: The 'gtts' library is required for open-source TTS.")
     st.stop()
     
-# --- GEMS API (Requires 'google-genai' and 'pydantic' in requirements.txt) ---
+# --- GEMS API ---
 try:
     from google import genai
     from google.genai import types
@@ -54,7 +54,7 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# 🟢 FINAL FIRESTORE INITIALIZATION FIX APPLIED HERE
+# 🟢 FIRESTORE INITIALIZATION 
 try:
     # CRITICAL FIX: Ensure the secret value is treated as a string before loading the JSON.
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"].strip().strip('"').strip("'")
@@ -65,9 +65,7 @@ try:
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
 
-    # CORRECTED LINE: This now correctly calls client() on the firebase_admin.firestore module
     db = firestore.client() 
-    # Define the main collection path (shared public data)
     VOCAB_COLLECTION = db.collection("sat_vocabulary")
     
 except KeyError:
@@ -98,7 +96,6 @@ class SatWord(BaseModel):
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
     audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
-    # 🟢 NEW: Firestore field to ensure proper sorting
     created_at: float = Field(default_factory=time.time)
 
 # ----------------------------------------------------------------------
@@ -112,8 +109,7 @@ if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'words_displayed' not in st.session_state: st.session_state.words_displayed = LOAD_BATCH_SIZE
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
-# 🟢 NEW FLAG FOR BACKGROUND EXTRACTION
-if 'is_extracting_background' not in st.session_state: st.session_state.is_extracting_background = False
+# 🛑 REMOVED is_extracting_background FLAG (No more automatic background loops)
 
 
 def load_vocabulary_from_firestore():
@@ -164,8 +160,8 @@ def generate_tts_audio(text: str) -> Optional[str]:
         return base64_data
 
     except Exception as e:
+        # We must print the error since st.error cannot be called inside a background task
         print(f"gTTS Generation failed for word: {text}. Error: {e}")
-        # Note: Do NOT use st.error here, as this function is run in the background.
         return None
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
@@ -190,7 +186,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     words_with_audio = []
     
-    # Run TTS without Streamlit progress bars (as it's background)
+    # Run TTS without Streamlit progress bars
     for word_data in validated_words:
         word = word_data['word']
         audio_data = generate_tts_audio(word)
@@ -199,67 +195,127 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     return words_with_audio
 
-def run_background_extraction():
-    """
-    CRITICAL FIX: This runs the slow AI task in the background (triggered by a flag)
-    and uses st.rerun() only once when the slow task is complete, minimizing delay.
-    """
-    if not st.session_state.is_auth or not st.session_state.is_extracting_background:
-        return
-        
-    # Check if we still need words
-    word_count = len(st.session_state.vocab_data)
-    if word_count >= AUTO_EXTRACT_TARGET_SIZE:
-        st.session_state.is_extracting_background = False
-        st.toast(f"✅ Extraction target ({AUTO_EXTRACT_TARGET_SIZE}) reached!")
+def handle_manual_word_entry(word: str):
+    """Generates pronunciation and LLM content for a single word and saves it to Firestore."""
+    
+    if not word:
+        st.error("Please enter a word.")
         return
 
-    # Extract only 1 word (for minimum delay)
-    words_to_extract = 1
+    st.info(f"Generating data for '{word}'...")
+    
+    audio_data = generate_tts_audio(word)
+    if not audio_data:
+        st.error(f"🔴 Failed to generate pronunciation audio for '{word}'. Please check API key and retry.")
+        return
+
+    prompt = f"Generate the pronunciation, definition, mnemonic tip, and a usage sentence for the high-level SAT word: {word}. Return only the JSON object."
+    
+    try:
+        list_schema = {"type": "array", "items": SatWord.model_json_schema()}
+        config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
+        
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt, config=config
+        )
+        
+        data_list = json.loads(response.text)
+        if not data_list or not isinstance(data_list, list) or 'word' not in data_list[0]:
+            raise ValueError("LLM returned invalid data structure.")
+            
+        new_word_data = SatWord(**data_list[0]).model_dump()
+        
+    except Exception as e:
+        st.error(f"🔴 Failed to generate content for '{word}'. Error: {e}")
+        return
+
+    new_word_data['audio_base64'] = audio_data
+    
+    if new_word_data['word'].lower() != word.lower():
+        st.warning(f"Note: LLM corrected the word to '{new_word_data['word']}'. Using LLM's version.")
+
+    if save_word_to_firestore(new_word_data):
+        st.success(f"✅ Manually added '{new_word_data['word']}' with working pronunciation to Firebase!")
+        st.rerun()
+    else:
+        st.error("🔴 Failed to save to Firebase.")
+
+def handle_fix_single_audio(word_index: int):
+    """Generates missing audio for a single word and updates the Firestore document."""
+    
+    if word_index < 0 or word_index >= len(st.session_state.vocab_data):
+        st.error("Invalid word index.")
+        return
+        
+    word_data = st.session_state.vocab_data[word_index]
+    word = word_data['word']
+    
+    st.info(f"Attempting to fix pronunciation for '{word}'...")
+    
+    audio_data = generate_tts_audio(word)
+    
+    if audio_data:
+        if update_word_in_firestore({'word': word, 'audio_base64': audio_data}):
+            st.session_state.vocab_data[word_index]['audio_base64'] = audio_data
+            st.success(f"✅ Successfully fixed audio for '{word}' and saved to Firebase.")
+        else:
+            st.error(f"🔴 Audio generated, but failed to save update to Firebase for '{word}'.")
+    else:
+        st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
+    
+    st.rerun()
+
+def handle_bulk_audio_fix():
+    """
+    Scans all loaded vocabulary data and attempts to generate and save missing audio
+    for every word that is currently corrupted (audio_base64 is None).
+    """
+    words_to_fix_indices = [i for i, d in enumerate(st.session_state.vocab_data) if d.get('audio_base64') is None]
+    
+    if not words_to_fix_indices:
+        st.success("All loaded words already have pronunciation audio!")
+        return
+
+    status_placeholder = st.empty()
+    fixed_count = 0
+    total_count = len(words_to_fix_indices)
+
+    status_placeholder.info(f"Starting bulk fix for {total_count} corrupted words...")
+    
+    for i, index in enumerate(words_to_fix_indices):
+        word_data = st.session_state.vocab_data[index]
+        word = word_data['word']
+
+        status_placeholder.progress((i + 1) / total_count, 
+                                        text=f"Fixing {word}... ({i + 1}/{total_count} processed)")
+
+        audio_data = generate_tts_audio(word)
+
+        if audio_data:
+            if update_word_in_firestore({'word': word, 'audio_base64': audio_data}):
+                st.session_state.vocab_data[index]['audio_base64'] = audio_data
+                fixed_count += 1
+            else:
+                st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
+
+        time.sleep(0.5) 
+    
+    
+    if fixed_count > 0:
+        st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
+    else:
+        st.error(f"🔴 Bulk fix attempted, but audio generation failed for all {total_count} words or failed to save to Firebase. Check server logs/quotas.")
+        
+    status_placeholder.empty()
+    st.rerun()
+
+def handle_admin_extraction_button(num_words: int):
+    """Handles the bulk 50 word manual extraction."""
+    st.info(f"Manually extracting {num_words} new words...")
     
     existing_words = [d['word'] for d in st.session_state.vocab_data]
     
     # 🛑 SLOW STEP: AI extraction and TTS generation runs here
-    new_words = real_llm_vocabulary_extraction(words_to_extract, existing_words) 
-    
-    if new_words:
-        word_data = new_words[0]
-        if save_word_to_firestore(word_data):
-            st.session_state.vocab_data.append(word_data)
-            
-            # Use st.toast for passive feedback
-            st.toast(f"✅ Added 1 word in background. Total: {word_count + 1}")
-            
-            # Only rerun if extraction was successful to check for the next word
-            time.sleep(0.1)
-            st.rerun()
-        else:
-            print("Failed to save word to Firestore. Stopping background extraction.")
-            st.session_state.is_extracting_background = False
-    else:
-        print("AI extraction failed. Stopping background extraction.")
-        st.session_state.is_extracting_background = False
-
-def start_background_extraction_manual():
-    """Admin button handler to start the background process."""
-    if not st.session_state.is_admin:
-        st.error("Only the Admin can start background extraction.")
-        return
-    
-    st.session_state.is_extracting_background = True
-    st.rerun() # Forces a rerun to hit the passive extraction function
-
-def stop_background_extraction_manual():
-    """Admin button handler to stop the background process."""
-    st.session_state.is_extracting_background = False
-    st.info("Background extraction paused.")
-
-def handle_admin_extraction_button(num_words: int):
-    """Handles the bulk 50 word manual extraction."""
-    st.session_state.is_extracting_background = False
-    st.info(f"Manually extracting {num_words} new words...")
-    
-    existing_words = [d['word'] for d in st.session_state.vocab_data]
     new_batch = real_llm_vocabulary_extraction(num_words, existing_words) 
     
     if new_batch:
@@ -274,10 +330,21 @@ def handle_admin_extraction_button(num_words: int):
     else:
         st.error("🔴 Failed to generate new words. Check API key and logs.")
 
+def fill_missing_audio(vocab_data: List[Dict]) -> bool:
+    """Checks for missing audio to display the correct warning/fix options."""
+    words_to_fix = [d for d in vocab_data if d.get('audio_base64') is None]
+    if not words_to_fix:
+        return False
+
+    st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. Use the 'Fix Audio' button next to each word or the 'Bulk Fix' tool.")
+    
+    return False 
+
+
 def load_and_update_vocabulary_data():
     """
-    Loads data passively upon login/app start. 
-    It is no longer responsible for *starting* extraction.
+    CRITICAL FIX: This function is now fully passive and only loads existing data.
+    The app will load instantly because no slow AI tasks run here.
     """
     if not st.session_state.is_auth: return
     
@@ -290,33 +357,25 @@ def load_and_update_vocabulary_data():
     if word_count > 0:
         st.info(f"✅ Loaded {word_count} words from shared database (Firestore).")
     elif st.session_state.is_auth:
-        st.info("Database is empty. Please log in as Admin and use the 'Data Tools' tab to extract the first batch of words.")
+        st.info("Database is empty. Please use the 'Data Tools' tab to extract the first batch of words.")
 
-    # 🛑 CRITICAL: Check and run the background task here after loading data
-    if st.session_state.is_extracting_background and st.session_state.is_admin:
-        run_background_extraction() 
+    # --- NO AUTOMATIC EXTRACTION OR ST.RERUN() CALLS HERE ---
+
 
 def handle_auth(action: str, email: str, password: str):
-    """
-    Handles Mock user registration and login.
-    """
+    """Handles Mock user registration and login."""
     if not email or not password:
         st.error("Please enter both Email and Password.")
         return
         
-    # 1. Admin Login Check
     if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
         is_admin = True
-        
-    # 2. General User Login Check (Simple Format Validation)
     elif len(password) >= 6 and '@' in email and '.' in email:
         is_admin = False
-    
     else:
         st.error("Invalid credentials. Registration/Login requires a valid email and 6+ character password.")
         return
 
-    # Login/Register Success
     st.session_state.current_user_email = email
     st.session_state.is_auth = True
     st.session_state.is_admin = is_admin
@@ -602,16 +661,10 @@ def admin_extraction_ui():
 
     st.markdown("---")
 
-    # --- Background Extraction Control ---
-    st.subheader("Background Extraction Control (1 Word Patches)")
+    # --- Background Extraction Control (Removed for stable instant load) ---
+    st.subheader("Extraction Control")
+    st.info("Automatic continuous extraction is disabled for instant app loading.")
     
-    if st.session_state.is_extracting_background:
-        st.warning("Background extraction is **ACTIVE**. New words are being generated one at a time.")
-        st.button("Stop Continuous Extraction", on_click=stop_background_extraction_manual, type="secondary")
-    else:
-        st.info("Background extraction is **PAUSED**. Start to continuously build the vocabulary database.")
-        st.button("Start Continuous Extraction (1 Word Patch)", on_click=start_background_extraction_manual, type="primary")
-
     st.markdown("---")
     
     # --- Manual Extraction Override (Admin Only) ---
@@ -671,13 +724,13 @@ def main():
     if not st.session_state.is_auth:
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
-        # Load data on successful login 
+        # Load data on successful login (Fast operation)
         if not st.session_state.vocab_data:
             load_and_update_vocabulary_data() 
 
-        # Auto-extraction logic (non-blocking status message)
-        if st.session_state.is_admin and len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
-             st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. Start the background extraction in 'Data Tools' to build the list.")
+        # Non-blocking status message
+        if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
+             st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. Use the Admin 'Data Tools' tab to extract more.")
 
         # Use tabs for the main features
         tab_display, tab_quiz, tab_admin = st.tabs(["📚 Vocabulary List", "📝 Quiz Section", "🛠️ Data Tools"])

@@ -71,6 +71,7 @@ try:
     cleaned_value = cleaned_value.strip().strip("'").strip('"')
 
     # 3. Attempt to load the cleaned string as JSON
+    # This aggressive cleaning should prevent the 'Invalid control character' error.
     service_account_info = json.loads(cleaned_value)
     
     # 🛑 FIX FOR "Invalid private key" ERROR: CLEAN THE PRIVATE KEY FIELD EXPLICITLY

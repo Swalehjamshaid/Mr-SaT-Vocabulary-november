@@ -71,17 +71,17 @@ try:
     cleaned_value = cleaned_value.strip().strip("'").strip('"')
 
     # 3. Attempt to load the cleaned string as JSON
-    # This aggressive cleaning should prevent the 'Invalid control character' error.
     service_account_info = json.loads(cleaned_value)
     
-    # 🛑 FIX FOR "Invalid private key" ERROR: CLEAN THE PRIVATE KEY FIELD EXPLICITLY
+    # 🛑 THE FINAL FIX: SAFELY CLEAN THE PRIVATE KEY FIELD
     if 'private_key' in service_account_info:
         raw_key = service_account_info['private_key']
         
-        # Aggressively remove spaces/tabs that corrupt the base64 string
-        cleaned_key = raw_key.replace(" ", "").replace("\t", "") 
+        # 🟢 NEW SAFE CLEANING: We only strip *surrounding* whitespace and fix header spacing, 
+        # allowing the Base64 content to remain intact.
+        cleaned_key = raw_key.strip()
         
-        # Ensure the header and footer are clean
+        # Ensure the header and footer are correctly formatted (with spaces)
         cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
         cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
         
@@ -90,7 +90,7 @@ try:
 
     # 4. Initialize Firebase Admin SDK
     if not firebase_admin._apps:
-        # This will now use the aggressively cleaned key
+        # This will now use the safely cleaned key
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
 
@@ -101,7 +101,6 @@ except KeyError:
     st.error("🔴 FIREBASE SETUP FAILED: 'FIREBASE_SERVICE_ACCOUNT' secret not found. Data cannot be saved permanently.")
     st.stop()
 except Exception as e:
-    # This captures the persistent 'Invalid control character' and 'Invalid private key' errors
     st.error(f"🔴 FIREBASE INITIALIZATION FAILED: {e}. Check service account key format.")
     st.stop()
 

@@ -127,7 +127,7 @@ class SatWord(BaseModel):
     audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
     created_at: float = Field(default_factory=time.time)
     
-    # 🟢 MODIFIED FIELD: Re-added to store audio permanently
+    # 🟢 PERMANENTLY STORED
     briefing_text: Optional[str] = Field(default=None, description="The extended AI-generated briefing text.")
     briefing_audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for the briefing.")
 
@@ -145,11 +145,10 @@ if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
 if 'drill_word_index' not in st.session_state: st.session_state.drill_word_index = 0
 if 'auto_briefing_done' not in st.session_state: st.session_state.auto_briefing_done = False
-# 🟢 CHANGE: briefing_content_cache no longer needed since data is permanent
 if 'briefing_content_cache' not in st.session_state: st.session_state.briefing_content_cache = {} 
 if 'initial_load_done' not in st.session_state: st.session_state.initial_load_done = False
 if 'is_processing_autotask' not in st.session_state: st.session_state.is_processing_autotask = False
-if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None # For status board
+if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None
 
 
 def load_vocabulary_from_firestore():
@@ -201,7 +200,6 @@ def generate_tts_audio(text: str) -> Optional[str]:
     """Generates audio via gTTS and returns Base64 encoded MP3 data."""
     try:
         # gTTS produces a VBR MP3 stream. We cannot control bitrate for size reduction.
-        # The only way to reduce size is to reduce the length of 'text'.
         tts = gTTS(text=text, lang='en', slow=False)
         mp3_fp = io.BytesIO()
         tts.write_to_fp(mp3_fp)
@@ -293,7 +291,7 @@ def generate_word_briefing(word_data: Dict, word_index: int):
             # Return full content (text + permanent audio)
             return briefing_content_to_save
         else:
-            print(f"Could not save briefing text/audio to Firestore for {word_data['word']}.")
+            print(f"Could not save briefing text/audio to Firestore for {word_data['word']}. DOCUMENT MAY BE TOO LARGE.")
             return None
         
     except Exception as e:
@@ -453,10 +451,10 @@ def auto_generate_briefings():
     if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
 
-    # Check only for words missing the *text*, as the audio is now permanently stored
+    # Check for words missing the permanent briefing audio
     words_to_brief_indices = [
         i for i, d in enumerate(st.session_state.vocab_data) 
-        if not d.get('briefing_audio_base64') # 🟢 CHECKING FOR AUDIO B64 PRESENCE
+        if not d.get('briefing_audio_base64') 
     ]
     
     if not words_to_brief_indices:
@@ -510,7 +508,7 @@ def auto_generate_briefings_manual():
     
     words_to_brief_indices = [
         i for i, d in enumerate(st.session_state.vocab_data)  
-        if not d.get('briefing_audio_base64') # 🟢 CHECKING FOR AUDIO B64 PRESENCE
+        if not d.get('briefing_audio_base64') 
     ]
     
     if not words_to_brief_indices:
@@ -521,7 +519,7 @@ def auto_generate_briefings_manual():
     # Select the first BRIEFING_BATCH_SIZE words to process
     batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
     
-    st.session_state.autotask_message = f"Manually starting batch generation for {len(batch_indices)} missing briefings..."
+    st.session_state.autotask_message = f"Status: Manually starting batch generation for {len(batch_indices)} missing briefings..."
     
     generated_count = 0
     

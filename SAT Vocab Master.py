@@ -11,7 +11,7 @@ import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
 from pydantic import json_schema 
 
-# 🟢 FINAL FIREBASE IMPORTS 
+# --- EXTERNAL API IMPORTS ---
 try:
     from firebase_admin import credentials, initialize_app, firestore 
     import firebase_admin 
@@ -19,8 +19,6 @@ except ImportError:
     st.error("FIREBASE ERROR: The required library 'firebase-admin' is likely missing in requirements.txt.")
     st.stop()
 
-
-# 🟢 Import gTTS and io 
 try:
     from gtts import gTTS
     import io
@@ -28,7 +26,6 @@ except ImportError:
     st.error("ERROR: The 'gtts' library is required for open-source TTS.")
     st.stop()
     
-# --- GEMS API ---
 try:
     from google import genai
     from google.genai import types
@@ -55,7 +52,7 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# 🟢 CRITICAL FIX: AGGRESSIVE SECRET CLEANING
+# Aggressive secret cleaning and Firebase initialization
 try:
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
     cleaned_value = secret_value.strip()
@@ -95,9 +92,9 @@ AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25 
-# 🟢 Continuous Auto-Fetch Batch Size for Briefings (This task is now OBSOLETE but kept for flow)
+# 🟢 OPTIMIZATION: Continuous Auto-Fetch Batch Size for LEGACY words
 BRIEFING_BATCH_SIZE = 10 
-# 🟢 Manual Bulk Fetch Size for 50 words
+# 🟢 NEW: Manual Bulk Fetch Size for 50 words
 MANUAL_BRIEFING_BATCH = 50 
 
 # Admin Configuration (Mock Login)
@@ -125,6 +122,7 @@ class SatWord(BaseModel):
 # 2. DATA PERSISTENCE & STATE MANAGEMENT (FIREBASE FIRESTORE)
 # ----------------------------------------------------------------------
 
+# Initialize Session State variables
 if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
 if 'is_auth' not in st.session_state: st.session_state.is_auth = False
 if 'vocab_data' not in st.session_state: st.session_state.vocab_data = None 
@@ -166,7 +164,7 @@ def save_word_to_firestore(word_data: Dict):
         get_all_vocabulary.clear() 
         return True
     except Exception as e:
-        st.error(f"🔴 Firestore Save Failed for {word_data['word']}: {e}")
+        print(f"🔴 Firestore Save Failed for {word_data['word']}: {e}")
         return False
         
 def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] = None):
@@ -184,7 +182,7 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
         get_all_vocabulary.clear() 
         return True
     except Exception as e:
-        st.error(f"🔴 Firestore Update Failed for {word_data['word']}: {e}")
+        print(f"🔴 Firestore Update Failed for {word_data['word']}: {e}")
         return False
 
 
@@ -206,7 +204,6 @@ def generate_tts_audio(text: str) -> Optional[str]:
         print(f"gTTS Generation failed for text segment. Error: {e}")
         return None
 
-# 🟢 NEW FUNCTION: Fetches the 2-Minute Briefing Text and Audio
 def generate_full_briefing(word_data: Dict):
     """
     Generates the detailed briefing text and its corresponding Base64 audio.
@@ -238,7 +235,6 @@ def generate_full_briefing(word_data: Dict):
         audio_data = generate_tts_audio(briefing_text)
             
         if not audio_data:
-            # We don't raise an exception here, just return failure state
             return None 
 
         return {
@@ -293,7 +289,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     return final_words
 
-# 🟢 The old single-word manual handler is updated to fetch all 3 parts
 def handle_manual_word_entry(word: str):
     """Generates pronunciation, briefing, and LLM content for a single word and saves it to Firestore."""
     
@@ -347,12 +342,108 @@ def handle_manual_word_entry(word: str):
         st.error("🔴 Failed to save to Firebase.")
 
 
-# 🟢 OBSOLETE: This function is no longer needed as all 3 parts are fetched simultaneously.
-# It is kept as a placeholder to avoid breaking the application structure, but it will be skipped.
+def handle_fix_single_audio(word_index: int):
+    """Generates missing audio for a single word and updates the Firestore document."""
+    
+    if word_index < 0 or word_index >= len(st.session_state.vocab_data):
+        st.error("Invalid word index.")
+        return
+        
+    word_data = st.session_state.vocab_data[word_index]
+    word = word_data['word']
+    
+    st.info(f"Attempting to fix pronunciation for '{word}'...")
+    
+    audio_data = generate_tts_audio(word)
+    
+    if audio_data:
+        # Pass update dictionary explicitly
+        fields_to_update = {'audio_base64': audio_data}
+        if update_word_in_firestore(word_data, fields_to_update):
+            st.session_state.vocab_data[word_index].update(fields_to_update)
+            st.success(f"✅ Successfully fixed audio for '{word}' and saved to Firebase.")
+        else:
+            st.error(f"🔴 Audio generated, but failed to save update to Firebase for '{word}'.")
+    else:
+        st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
+    
+    st.rerun()
+
+def handle_bulk_audio_fix():
+    """
+    Scans all loaded vocabulary data and attempts to generate and save missing audio
+    for every word that is currently corrupted (audio_base64 is None).
+    """
+    words_to_fix_indices = [i for i, d in enumerate(st.session_state.vocab_data) if d.get('audio_base64') is None]
+    
+    if not words_to_fix_indices:
+        st.success("All loaded words already have pronunciation audio!")
+        return
+
+    status_placeholder = st.empty()
+    fixed_count = 0
+    total_count = len(words_to_fix_indices)
+
+    status_placeholder.info(f"Starting bulk fix for {total_count} corrupted words...")
+    
+    with st.spinner("Processing audio fix... this may take a moment."):
+        for i, index in enumerate(words_to_fix_indices):
+            word_data = st.session_state.vocab_data[index]
+            word = word_data['word']
+    
+            audio_data = generate_tts_audio(word)
+    
+            if audio_data:
+                fields_to_update = {'audio_base64': audio_data}
+                if update_word_in_firestore(word_data, fields_to_update):
+                    st.session_state.vocab_data[index].update(fields_to_update)
+                    fixed_count += 1
+                else:
+                    st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
+            # 🛑 Removed time.sleep(0.1) for max speed
+    
+    
+    if fixed_count > 0:
+        st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
+    else:
+        st.error(f"🔴 Bulk fix attempted, but audio generation failed for all {total_count} words or failed to save to Firebase. Check server logs/quotas.")
+        
+    status_placeholder.empty()
+    st.rerun()
+
+def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
+    """Handles the bulk word extraction (manual or auto-triggered)."""
+    
+    if auto_fetch:
+        status_message = f"Automatically extracting {num_words} new words (Admin Only)..."
+    else:
+        status_message = f"Manually extracting {num_words} new words..."
+
+    st.info(status_message)
+    
+    existing_words = [d['word'] for d in st.session_state.vocab_data]
+    
+    # 🛑 SLOW STEP: AI extraction and ALL content generation runs here
+    new_batch = real_llm_vocabulary_extraction(num_words, existing_words) 
+    
+    if new_batch:
+        successful_saves = 0
+        for word_data in new_batch:
+            if save_word_to_firestore(word_data):
+                st.session_state.vocab_data.append(word_data)
+                successful_saves += 1
+                
+        if not auto_fetch:
+            st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
+        st.session_state.auto_fetch_done = True
+        st.rerun() 
+    else:
+        if not auto_fetch:
+            st.error("🔴 Failed to generate new words. Check API key and logs.")
+
 def auto_generate_briefings():
     """
-    This auto-fetch function is now deprecated, as new words are fetched with briefings.
-    It will only be used to process older words missing briefings, if any exist.
+    🟢 AUTO-FETCH: This function now only processes LEGACY words (words that were saved WITHOUT a briefing).
     """
     if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
@@ -971,7 +1062,7 @@ def admin_extraction_ui():
     with col_audio_fix:
         st.button(
             "Attempt Bulk Audio Fix (Fix All Missing Pronunciations)", 
-            on_on_click=handle_bulk_audio_fix, 
+            on_click=handle_bulk_audio_fix, 
             type="primary"
         )
     
@@ -1053,7 +1144,6 @@ def main():
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
         # 2. RUN AUTO TASKS (Triggers non-blocking background process for Admin)
-        # 🛑 This auto-fetch function now only handles LEGACY words missing the briefing
         if st.session_state.is_admin and st.session_state.initial_load_done:
             auto_generate_briefings() 
 

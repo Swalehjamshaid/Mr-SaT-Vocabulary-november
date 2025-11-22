@@ -190,6 +190,7 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
 # 3. AI EXTRACTION & AUDIO FUNCTIONS
 # ----------------------------------------------------------------------
 
+# 🟢 FIX: Added robust try/except to prevent network/service crash
 def generate_tts_audio(text: str) -> Optional[str]:
     """Generates audio via gTTS and returns Base64 encoded MP3 data."""
     try:
@@ -199,11 +200,12 @@ def generate_tts_audio(text: str) -> Optional[str]:
         mp3_fp.seek(0)
         base64_data = base64.b64encode(mp3_fp.read()).decode('utf-8')
         return base64_data
-
     except Exception as e:
-        print(f"gTTS Generation failed for text segment. Error: {e}")
+        # Log the error but return None instead of crashing
+        print(f"🔴 gTTS Generation failed for text segment '{text[:20]}...'. Error: {e}")
         return None
 
+# 🟢 FIX: Added robust try/except to prevent network/service crash
 def generate_full_briefing(word_data: Dict):
     """
     Generates the detailed briefing text and its corresponding Base64 audio.
@@ -235,6 +237,7 @@ def generate_full_briefing(word_data: Dict):
         audio_data = generate_tts_audio(briefing_text)
             
         if not audio_data:
+            print(f"🔴 Failed to generate audio for briefing text: '{briefing_text[:20]}...'")
             return None 
 
         return {
@@ -243,7 +246,8 @@ def generate_full_briefing(word_data: Dict):
         }
         
     except Exception as e:
-        print(f"🔴 Briefing Generation Failed for '{word}': {e}")
+        # Log the error but return None instead of crashing the script
+        print(f"🔴 Gemini/Briefing Generation Failed for '{word}': {e}")
         return None
 
 # 🟢 MODIFIED FUNCTION: Fetches ALL 3 parts simultaneously

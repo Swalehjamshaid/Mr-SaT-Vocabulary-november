@@ -95,7 +95,7 @@ AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25 
-# 🟢 FINAL FIX: Increased Batch Size for faster throughput
+# 🟢 OPTIMIZATION: Increased Batch Size for faster throughput
 BRIEFING_BATCH_SIZE = 10 
 
 # Admin Configuration (Mock Login)
@@ -440,6 +440,7 @@ def auto_generate_briefings():
     Scans for words missing briefing content and auto-generates for a batch, 
     forcing a silent rerun if more work is pending. This is non-blocking.
     """
+    # 🟢 Auto-fetch function
     if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
 
@@ -989,7 +990,7 @@ def two_minute_drill_ui():
             audio_data_url = f"data:audio/mp3;base64,{briefing['audio_base64']}"
             audio_html = f"""
                 <audio controls style="width: 100%;" src="{audio_data_url}">
-                    Your browser does not support the audio element.
+                            Your browser does not support the audio element.
                 </audio>
             """
             st.markdown(audio_html, unsafe_allow_html=True)
@@ -1020,6 +1021,7 @@ def admin_extraction_ui():
     """Renders the Admin Extraction and User Management feature."""
     st.header("💡 Data Tools", divider="orange") 
     
+    # 🛑 CRITICAL FIX: Ensure the correct Admin check is used here
     if not st.session_state.is_admin:
         st.warning("You must be logged in as the Admin to use this tool.")
         return
@@ -1060,7 +1062,7 @@ def admin_extraction_ui():
         )
     
     with col_briefing_gen:
-        # 🟢 MANUAL BRIEFING BUTTON
+        # 🟢 MANUAL BRIEFING BUTTON (Bulk Extraction of Briefings)
         st.button(
             "Force Generate Missing 2-Min Briefings (Batch)", 
             on_click=auto_generate_briefings_manual, # Manual call

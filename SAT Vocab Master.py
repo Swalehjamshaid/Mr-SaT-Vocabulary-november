@@ -580,6 +580,7 @@ def handle_auth(action: str, email: str, password: str):
         st.error("Please enter both Email and Password.")
         return
         
+    # Ensure correct Admin email check
     if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
         is_admin = True
     elif len(password) >= 6 and '@' in email and '.' in email:

@@ -57,36 +57,22 @@ except Exception as e:
 
 # 🟢 CRITICAL FIX: AGGRESSIVE SECRET CLEANING
 try:
-    # 1. Get the raw secret value (which may include unwanted characters from Streamlit's editor)
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
-
-    # 2. AGGRESSIVE CLEANING: Strip all surrounding quotes, newlines, and tabs.
     cleaned_value = secret_value.strip()
     
-    # Remove surrounding triple quotes
     if cleaned_value.startswith('"""') and cleaned_value.endswith('"""'):
         cleaned_value = cleaned_value[3:-3].strip()
 
-    # Final strip of any remaining single/double quotes or whitespace on the ends
     cleaned_value = cleaned_value.strip().strip("'").strip('"')
-
-    # 3. Attempt to load the cleaned string as JSON
     service_account_info = json.loads(cleaned_value)
     
-    # 🛑 SAFE FIX FOR "Invalid private key" ERROR
     if 'private_key' in service_account_info:
         raw_key = service_account_info['private_key']
-        
-        # Only strip surrounding whitespace and fix header spacing
         cleaned_key = raw_key.strip()
-        
-        # Ensure the header and footer are correctly formatted (with spaces)
         cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
         cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
-        
         service_account_info['private_key'] = cleaned_key
 
-    # 4. Initialize Firebase Admin SDK
     if not firebase_admin._apps:
         cred = credentials.Certificate(service_account_info)
         initialize_app(cred)
@@ -154,7 +140,6 @@ if 'autotask_message' not in st.session_state: st.session_state.autotask_message
 def load_vocabulary_from_firestore():
     """Loads all vocabulary data from Firestore."""
     try:
-        # 🛑 THIS IS THE SLOW STEP
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
         vocab_list = [doc.to_dict() for doc in docs]
         return vocab_list
@@ -178,16 +163,13 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
         
         if fields_to_update:
-            # Save the new fields, including the briefing audio
             doc_ref.update(fields_to_update)
         else:
-            # Default update (used for audio fix in older version)
             doc_ref.update({
                 'audio_base64': word_data['audio_base64']
             })
         return True
     except Exception as e:
-        # Log the specific error to help with debugging
         st.error(f"🔴 Firestore Update Failed for {word_data['word']}: {e}")
         return False
 
@@ -596,6 +578,7 @@ def handle_auth(action: str, email: str, password: str):
         st.error("Invalid credentials. Registration/Login requires a valid email and 6+ character password.")
         return
 
+    # 🟢 CRITICAL FIX: Set session state flags IMMEDIATELY
     st.session_state.current_user_email = email
     st.session_state.is_auth = True
     st.session_state.is_admin = is_admin

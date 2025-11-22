@@ -124,7 +124,6 @@ class SatWord(BaseModel):
 
 if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
 if 'is_auth' not in st.session_state: st.session_state.is_auth = False
-# 🛑 Change 1: vocab_data initialized to None to check if load is needed
 if 'vocab_data' not in st.session_state: st.session_state.vocab_data = None 
 if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'current_page_index' not in st.session_state: st.session_state.current_page_index = 0
@@ -138,11 +137,10 @@ if 'is_processing_autotask' not in st.session_state: st.session_state.is_process
 if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None
 
 
-# 🟢 Change 2: Caching the Firestore fetch function
+# 🟢 CACHING FUNCTION: This heavy operation runs only once per session
 @st.cache_data(show_spinner=False)
 def get_all_vocabulary():
     """Fetches all vocabulary data from Firestore, optimized by Streamlit caching."""
-    print("Executing full Firestore fetch...") # Debugging confirmation
     try:
         # 🛑 This synchronous load only happens once per session/cache clear
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
@@ -550,7 +548,7 @@ def load_and_update_vocabulary_data():
     """
     Loads data into session state using the cached function.
     """
-    if not st.session_state.is_auth: return []
+    if not st.session_state.is_auth: return
     
     # 🛑 Load data using the cached function
     vocab_list = load_vocabulary_from_firestore()
@@ -600,7 +598,7 @@ def handle_auth(action: str, email: str, password: str):
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
 
     # 🛑 SYNCHRONOUS LOAD WITH VISUAL SPINNER (Only slow on first run/cache clear)
-    with st.spinner("Downloading all vocabulary records from Firestore... Please wait."):
+    with st.spinner("Downloading all vocabulary records from Firestore... Please wait. This is only slow once per session."):
         load_and_update_vocabulary_data() 
         
     st.rerun()
@@ -638,7 +636,7 @@ def go_to_prev_page():
     
 def next_drill_word():
     """Advances the drill word index."""
-    if st.session_state.drill_word_index < len(st.session_state.vocab_data) - 1:
+    if st.session_state.drill_word_index < len(st.session_state.vocab_data):
         st.session_state.drill_word_index += 1
         st.session_state.briefing_content_cache = {} # Clear cache
         st.rerun()
@@ -1057,7 +1055,7 @@ def admin_extraction_ui():
     with col_audio_fix:
         st.button(
             "Attempt Bulk Audio Fix (Fix All Missing Pronunciations)", 
-            on_on_click=handle_bulk_audio_fix, 
+            on_click=handle_bulk_audio_fix, 
             type="primary"
         )
     
@@ -1138,7 +1136,6 @@ def main():
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
         # 2. RUN AUTO TASKS (Triggers non-blocking background process for Admin)
-        # This will run instantly if the data is cached, kicking off the fetching loop
         if st.session_state.is_admin and st.session_state.initial_load_done:
             auto_generate_briefings() 
 

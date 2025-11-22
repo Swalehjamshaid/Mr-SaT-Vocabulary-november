@@ -1,14 +1,11 @@
 import json
 import time
 import random
-import sys
 import os
 import base64
-import urllib.parse
-import re
 from typing import List, Dict, Optional
 import streamlit as st
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 from pydantic import json_schema
 
 # --- EXTERNAL API IMPORTS ---
@@ -16,7 +13,7 @@ try:
     from firebase_admin import credentials, initialize_app, firestore
     import firebase_admin
 except ImportError:
-    st.error("FIREBASE ERROR: The required library 'firebase-admin' is likely missing in requirements.txt.")
+    st.error("FIREBASE ERROR: The required library 'firebase-admin' is likely missing.")
     st.stop()
 
 try:
@@ -35,13 +32,11 @@ except ImportError:
 
 
 # ======================================================================
-# *** FIREBASE SETUP & INITIALIZATION ***
+# 1. SETUP & INITIALIZATION
 # ======================================================================
 
 # Check for API Key (Gemini)
-if "GEMINI_API_KEY" in os.environ:
-    api_key = os.environ["GEMINI_API_KEY"]
-else:
+if "GEMINI_API_KEY" not in os.environ:
     st.error("🔴 GEMINI_API_KEY is missing! Please set it in your Streamlit Secrets.")
     st.stop()
 
@@ -56,16 +51,17 @@ except Exception as e:
 # Aggressive secret cleaning and Firebase initialization
 try:
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
-    cleaned_value = secret_value.strip()
+    cleaned_value = secret_value.strip().strip("'").strip('"')
     
+    # Check and clean potential triple quotes from Streamlit Secrets formatting
     if cleaned_value.startswith('"""') and cleaned_value.endswith('"""'):
         cleaned_value = cleaned_value[3:-3].strip()
 
-    cleaned_value = cleaned_value.strip().strip("'").strip('"')
     service_account_info = json.loads(cleaned_value)
     
     if 'private_key' in service_account_info:
         raw_key = service_account_info['private_key']
+        # Normalize private key format (common issue with environment variables)
         cleaned_key = raw_key.strip()
         cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
         cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
@@ -73,7 +69,7 @@ try:
 
     if not firebase_admin._apps:
         cred = credentials.Certificate(service_account_info)
-        initialize_app(cred)
+        initialize_app(cred, name="vocab_builder_app") 
 
     db = firestore.client() 
     VOCAB_COLLECTION = db.collection("sat_vocabulary")
@@ -89,13 +85,10 @@ except Exception as e:
 # --- App State and Constants ---
 REQUIRED_WORD_COUNT = 2000 
 LOAD_BATCH_SIZE = 10 
-AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT 
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25 
-# 🟢 OPTIMIZATION: Continuous Auto-Fetch Batch Size for LEGACY words
 BRIEFING_BATCH_SIZE = 10 
-# 🟢 NEW: Manual Bulk Fetch Size for 50 words
 MANUAL_BRIEFING_BATCH = 50 
 
 # Admin Configuration (Mock Login)
@@ -105,23 +98,24 @@ MANUAL_EXTRACT_BATCH = 50
 
 # Pydantic Schema for Vocabulary Word
 class SatWord(BaseModel):
+    """Pydantic model for a vocabulary word, defining required structure."""
     word: str = Field(description="The SAT-level word.")
     pronunciation: str = Field(description="Simple, hyphenated phonetic pronunciation (e.g., eh-FEM-er-al).")
     definition: str = Field(description="The concise dictionary definition.")
     tip: str = Field(description="A short, catchy mnemonic memory tip.")
     usage: str = Field(description="A professional sample usage sentence.")
     sat_level: str = Field(default="High", description="Should always be 'High'.")
-    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
+    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for word pronunciation.")
     created_at: float = Field(default_factory=time.time)
     
-    # 🟢 PERMANENTLY STORED BRIEFING FIELDS
+    # PERMANENTLY STORED BRIEFING FIELDS (2-Minute Overview)
     briefing_text: Optional[str] = Field(default=None, description="The extended AI-generated briefing text.")
     briefing_audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for the briefing.")
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # 2. DATA PERSISTENCE & STATE MANAGEMENT (FIREBASE FIRESTORE)
-# ----------------------------------------------------------------------
+# ======================================================================
 
 # Initialize Session State variables
 if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
@@ -133,17 +127,14 @@ if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
 if 'drill_word_index' not in st.session_state: st.session_state.drill_word_index = 0
 if 'auto_briefing_done' not in st.session_state: st.session_state.auto_briefing_done = False
-if 'briefing_content_cache' not in st.session_state: st.session_state.briefing_content_cache = {} 
 if 'initial_load_done' not in st.session_state: st.session_state.initial_load_done = False
 if 'is_processing_autotask' not in st.session_state: st.session_state.is_processing_autotask = False
 if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None
-# 🟢 CRITICAL FIX: Cache Key for controlled data refresh
 if 'data_refresh_key' not in st.session_state: st.session_state.data_refresh_key = 0
 
 
-# 🟢 MODIFIED CACHING FUNCTION: Now accepts a key to control cache busting
 @st.cache_data(show_spinner=False)
-def get_all_vocabulary(cache_key: int):
+def get_all_vocabulary(cache_key: int) -> List[Dict]:
     """Fetches all vocabulary data from Firestore, optimized by Streamlit caching."""
     # The function runs only if the cache_key changes.
     print(f"--- FETCHING DATA: Cache Key {cache_key} changed/not found. Running Firestore query. ---")
@@ -155,41 +146,30 @@ def get_all_vocabulary(cache_key: int):
         st.error(f"🔴 Firestore Load Failed: {e}")
         return []
 
-def load_vocabulary_from_firestore():
+def load_vocabulary_from_firestore() -> List[Dict]:
     """Wrapper for the cached function, passing the session state key."""
-    # 🟢 Use the session state key to control refresh
     return get_all_vocabulary(st.session_state.data_refresh_key)
 
 def increment_data_refresh_key():
     """Forces a cache bust on the next data load."""
     st.session_state.data_refresh_key += 1
 
-def save_word_to_firestore(word_data: Dict):
+def save_word_to_firestore(word_data: Dict) -> bool:
     """Adds a single word document to the Firestore collection."""
     try:
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
         doc_ref.set(word_data, merge=False)
-        
-        # 🟢 CRITICAL FIX: Increment key instead of calling .clear()
         increment_data_refresh_key()
         return True
     except Exception as e:
         print(f"🔴 Firestore Save Failed for {word_data['word']}: {e}")
         return False
         
-def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] = None):
-    """Updates a single word document in the Firestore collection."""
+def update_word_in_firestore(word_data: Dict, fields_to_update: Dict) -> bool:
+    """Updates specific fields of a word document in the Firestore collection."""
     try:
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
-        
-        if fields_to_update:
-            doc_ref.update(fields_to_update)
-        else:
-            doc_ref.update({
-                'audio_base64': word_data['audio_base64']
-            })
-        
-        # 🟢 CRITICAL FIX: Increment key instead of calling .clear()
+        doc_ref.update(fields_to_update)
         increment_data_refresh_key()
         return True
     except Exception as e:
@@ -197,13 +177,15 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
         return False
 
 
-# ----------------------------------------------------------------------
-# 3. AI EXTRACTION & AUDIO FUNCTIONS
-# ----------------------------------------------------------------------
+# ======================================================================
+# 3. AI EXTRACTION & AUDIO FUNCTIONS (FIXED CONTINUOUS FETCH)
+# ======================================================================
 
-# 🟢 FIX: Added robust try/except to prevent network/service crash
 def generate_tts_audio(text: str) -> Optional[str]:
     """Generates audio via gTTS and returns Base64 encoded MP3 data."""
+    if not text:
+        return None
+        
     try:
         tts = gTTS(text=text, lang='en', slow=False)
         mp3_fp = io.BytesIO()
@@ -212,19 +194,18 @@ def generate_tts_audio(text: str) -> Optional[str]:
         base64_data = base64.b64encode(mp3_fp.read()).decode('utf-8')
         return base64_data
     except Exception as e:
-        # Log the error but return None instead of crashing
         print(f"🔴 gTTS Generation failed for text segment '{text[:20]}...'. Error: {e}")
         return None
 
-# 🟢 FIX: Added robust try/except to prevent network/service crash
-def generate_full_briefing(word_data: Dict):
+def generate_full_briefing(word_data: Dict) -> Optional[Dict]:
     """
     Generates the detailed briefing text and its corresponding Base64 audio.
     Returns a dictionary of briefing fields or None on failure.
     """
-    word = word_data['word']
-    definition = word_data['definition']
+    word = word_data.get('word', 'a high-level word')
+    definition = word_data.get('definition', 'a complex meaning')
     
+    # Prompt is designed for a concise 60-80 word briefing
     prompt = f"""
     You are a vocabulary tutor. Write a **short, memorable, and concise briefing (5-6 sentences maximum, about 60-80 words)** on the word '{word}'. 
     
@@ -238,13 +219,15 @@ def generate_full_briefing(word_data: Dict):
     """
     
     try:
-        # 1. Generate Briefing Text (Source: Gemini API)
+        # 1. Generate Briefing Text (Gemini API)
         response = gemini_client.models.generate_content(
-            model="gemini-2.5-flash", contents=prompt
+            model="gemini-2.5-flash", 
+            contents=prompt,
+            config=types.GenerateContentConfig(temperature=0.7) 
         )
         briefing_text = response.text.strip()
             
-        # 2. Generate Briefing Audio (Source: gTTS)
+        # 2. Generate Briefing Audio (gTTS)
         audio_data = generate_tts_audio(briefing_text)
             
         if not audio_data:
@@ -257,15 +240,14 @@ def generate_full_briefing(word_data: Dict):
         }
         
     except Exception as e:
-        # Log the error but return None instead of crashing the script
         print(f"🔴 Gemini/Briefing Generation Failed for '{word}': {e}")
         return None
 
-# 🟢 MODIFIED FUNCTION: Fetches ALL 3 parts simultaneously
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
-    Calls the Gemini API to generate structured vocabulary data and then synchronously
-    generates the pronunciation and the full 2-Minute briefing and audio.
+    Calls Gemini to generate base structured vocabulary and then synchronously
+    generates word pronunciation and the FULL 2-Minute briefing and audio.
+    This ensures all required data is fetched before saving.
     """
     
     prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
@@ -286,7 +268,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     final_words = []
     
-    # 2. Add Pronunciation & 2-Minute Briefing (Synchronously)
+    # 2. Add Pronunciation & 2-Minute Briefing (CRITICAL STEP)
     with st.spinner(f"Generating Pronunciation, Briefings, and saving {len(validated_words)} words... This is a slow, multi-step process."):
         for word_data in validated_words:
             
@@ -299,13 +281,16 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
             
             if briefing_content:
                 word_data.update(briefing_content)
+            else:
+                # Still save the base word, but briefing is missing
+                print(f"Warning: Briefing generation failed for {word_data['word']}. It will be tagged for legacy fix.")
             
             final_words.append(word_data)
         
     return final_words
 
 def handle_manual_word_entry(word: str):
-    """Generates pronunciation, briefing, and LLM content for a single word and saves it to Firestore."""
+    """Generates all content for a single word and saves it to Firestore."""
     
     if not word:
         st.error("Please enter a word.")
@@ -313,7 +298,7 @@ def handle_manual_word_entry(word: str):
 
     st.info(f"Generating all content (Pronunciation, Definition, Briefing) for '{word}'...")
     
-    # --- Part 1: Get Base Word Data ---
+    # --- Part 1: Get Base Word Data via LLM ---
     prompt = f"Generate the pronunciation, definition, mnemonic tip, and a usage sentence for the high-level SAT word: {word}. Return only the JSON object."
     
     try:
@@ -350,15 +335,13 @@ def handle_manual_word_entry(word: str):
         st.warning(f"Note: LLM corrected the word to '{new_word_data['word']}'. Using LLM's version.")
 
     if save_word_to_firestore(new_word_data):
-        # Data is refreshed automatically on next rerun because save_word_to_firestore increments the key
         st.success(f"✅ Successfully added '{new_word_data['word']}' with ALL content to Firebase!")
         st.rerun()
     else:
         st.error("🔴 Failed to save to Firebase.")
 
-
 def handle_fix_single_audio(word_index: int):
-    """Generates missing audio for a single word and updates the Firestore document."""
+    """Generates missing pronunciation audio for a single word and updates the Firestore document."""
     
     if word_index < 0 or word_index >= len(st.session_state.vocab_data):
         st.error("Invalid word index.")
@@ -372,10 +355,8 @@ def handle_fix_single_audio(word_index: int):
     audio_data = generate_tts_audio(word)
     
     if audio_data:
-        # Pass update dictionary explicitly
         fields_to_update = {'audio_base64': audio_data}
         if update_word_in_firestore(word_data, fields_to_update):
-            # Update local state immediately before rerun
             st.session_state.vocab_data[word_index].update(fields_to_update)
             st.success(f"✅ Successfully fixed audio for '{word}' and saved to Firebase.")
         else:
@@ -383,14 +364,10 @@ def handle_fix_single_audio(word_index: int):
     else:
         st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
     
-    # Rerun is needed to refresh the page/table
     st.rerun()
 
 def handle_bulk_audio_fix():
-    """
-    Scans all loaded vocabulary data and attempts to generate and save missing audio
-    for every word that is currently corrupted (audio_base64 is None).
-    """
+    """Attempts to generate and save missing pronunciation audio for all corrupted words."""
     words_to_fix_indices = [i for i, d in enumerate(st.session_state.vocab_data) if d.get('audio_base64') is None]
     
     if not words_to_fix_indices:
@@ -419,7 +396,6 @@ def handle_bulk_audio_fix():
                     st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
     
     if fixed_count > 0:
-        # 🟢 Increment key after successful bulk fix
         increment_data_refresh_key()
         st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
     else:
@@ -431,10 +407,7 @@ def handle_bulk_audio_fix():
 def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
     """Handles the bulk word extraction (manual or auto-triggered)."""
     
-    if auto_fetch:
-        status_message = f"Automatically extracting {num_words} new words (Admin Only)..."
-    else:
-        status_message = f"Manually extracting {num_words} new words..."
+    status_message = f"Automatically extracting {num_words} new words (Admin Only)..." if auto_fetch else f"Manually extracting {num_words} new words..."
 
     st.info(status_message)
     
@@ -447,7 +420,6 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
         successful_saves = 0
         for word_data in new_batch:
             if save_word_to_firestore(word_data):
-                # save_word_to_firestore already increments the key, triggering refresh
                 st.session_state.vocab_data.append(word_data)
                 successful_saves += 1
                 
@@ -461,12 +433,12 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
 
 def auto_generate_briefings():
     """
-    🟢 AUTO-FETCH: This function now only processes LEGACY words (words that were saved WITHOUT a briefing).
+    AUTO-FETCH: Admin background task to process LEGACY words missing the 2-minute briefing.
     """
     if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
 
-    # Check for words missing the permanent briefing audio (for legacy/older words only)
+    # Check for words missing the permanent briefing audio
     words_to_brief_indices = [
         i for i, d in enumerate(st.session_state.vocab_data) 
         if not d.get('briefing_audio_base64') 
@@ -476,7 +448,6 @@ def auto_generate_briefings():
         st.session_state.auto_briefing_done = True
         return
 
-    # Only process the legacy words in batches
     st.session_state.is_processing_autotask = True
     batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
     
@@ -497,8 +468,6 @@ def auto_generate_briefings():
                 st.session_state.vocab_data[index].update(briefing_content)
                 generated_count += 1
             
-        # 🛑 REMOVED time.sleep(1) to maximize speed
-            
     remaining_words_count = len(words_to_brief_indices) - generated_count
         
     st.session_state.is_processing_autotask = False
@@ -511,8 +480,6 @@ def auto_generate_briefings():
         st.session_state.autotask_message = f"✅ Auto-Briefing complete: All {len(st.session_state.vocab_data)} words now have briefings."
         st.rerun()
 
-
-# 🟢 MANUAL BATCH GENERATION (The new function for 50 words)
 def auto_generate_briefings_manual(batch_size: int):
     """
     Manually triggers a large batch generation of missing briefing content 
@@ -566,7 +533,6 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
     
     return False 
 
-
 def load_and_update_vocabulary_data():
     """
     Loads data into session state using the cached function.
@@ -591,9 +557,8 @@ def load_and_update_vocabulary_data():
 
     # 3. AUTO-FETCH LOGIC FOR ADMIN (Vocabulary Extraction)
     if st.session_state.is_admin and word_count < AUTO_FETCH_THRESHOLD and 'auto_fetch_done' not in st.session_state:
-        # This part is blocking but critical for initial functionality.
         handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
-        return # Stop execution here to allow extraction to complete
+        return 
 
 
 def handle_auth(action: str, email: str, password: str):
@@ -602,7 +567,6 @@ def handle_auth(action: str, email: str, password: str):
         st.error("Please enter both Email and Password.")
         return
         
-    # Ensure correct Admin email check
     if email == ADMIN_EMAIL and password == ADMIN_PASSWORD:
         is_admin = True
     elif len(password) >= 6 and '@' in email and '.' in email:
@@ -611,28 +575,25 @@ def handle_auth(action: str, email: str, password: str):
         st.error("Invalid credentials. Registration/Login requires a valid email and 6+ character password.")
         return
 
-    # 🟢 CRITICAL FIX: Set session state flags IMMEDIATELY
     st.session_state.current_user_email = email
     st.session_state.is_auth = True
     st.session_state.is_admin = is_admin
-    st.session_state.current_page_index = 0 # Reset word display page
+    st.session_state.current_page_index = 0
     st.session_state.quiz_start_index = 0
     st.session_state.drill_word_index = 0 
     st.session_state.auto_fetch_done = False 
     st.session_state.auto_briefing_done = False 
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
     
-    # 🟢 CRITICAL FIX: Increment key on login to guarantee a fresh data fetch
+    # CRITICAL FIX: Increment key on login to guarantee a fresh data fetch
     increment_data_refresh_key()
 
-    # 🛑 SYNCHRONOUS LOAD WITH VISUAL SPINNER (Only slow on first run/cache clear)
-    with st.spinner("Downloading all vocabulary records from Firestore... Please wait. This is only slow once per session."):
-        # Load data uses the new key, ensuring a fresh query on initial login
+    # 🛑 SYNCHRONOUS LOAD WITH VISUAL SPINNER 
+    with st.spinner("Downloading all vocabulary records from Firestore... Please wait."):
         load_and_update_vocabulary_data() 
         
     st.rerun()
-              
-
+            
 def handle_logout():
     """Handles session state reset."""
     st.session_state.is_auth = False
@@ -645,13 +606,12 @@ def handle_logout():
     st.session_state.auto_fetch_done = False
     st.session_state.auto_briefing_done = False 
     st.session_state.autotask_message = None
-    # 🛑 Reset the refresh key
     st.session_state.data_refresh_key = 0
     st.rerun()
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # 4. UI COMPONENTS: VOCABULARY, QUIZ, ADMIN
-# ----------------------------------------------------------------------
+# ======================================================================
 
 def go_to_next_page():
     """Advances the displayed word page index."""
@@ -667,18 +627,15 @@ def next_drill_word():
     """Advances the drill word index."""
     if st.session_state.drill_word_index < len(st.session_state.vocab_data):
         st.session_state.drill_word_index += 1
-        st.session_state.briefing_content_cache = {} # Clear cache
         st.rerun()
 
 def prev_drill_word():
     """Decrements the displayed word page index."""
     if st.session_state.drill_word_index > 0:
         st.session_state.drill_word_index -= 1
-        st.session_state.briefing_content_cache = {} # Clear cache
         st.rerun()
 
 
-# 🟢 NEW UI: Data Board Display
 def data_board_ui():
     """Displays key metrics and the status of background tasks."""
     
@@ -687,7 +644,6 @@ def data_board_ui():
     
     word_count = len(st.session_state.vocab_data)
     missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-    # 🟢 CHECKING FOR BRIEFING AUDIO B64 PRESENCE
     missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
     
     st.header("📊 Application Status Board")
@@ -701,7 +657,6 @@ def data_board_ui():
     with cols[2]:
         st.metric(label="Words Missing Briefing", value=missing_briefing_count)
     with cols[3]:
-        # Display auto-task status
         status_message = st.session_state.get('autotask_message', "System Idle/Complete.")
         
         if "processing next batch" in status_message or "Generating" in status_message:
@@ -724,7 +679,6 @@ def display_vocabulary_ui():
 
     total_words = len(st.session_state.vocab_data)
     
-    # Calculate start and end indices for the current page
     start_index = st.session_state.current_page_index * LOAD_BATCH_SIZE
     end_index = min(start_index + LOAD_BATCH_SIZE, total_words)
     
@@ -733,7 +687,7 @@ def display_vocabulary_ui():
     st.markdown(f"**Showing Words {start_index + 1} - {end_index} of {total_words} High-Level SAT Words**")
     
     
-    # --- WORD DISPLAY CONTAINER (Removed fixed height for better vertical flow) ---
+    # --- WORD DISPLAY CONTAINER ---
     with st.container(border=True): 
         
         # Display the words for the current page only
@@ -746,11 +700,11 @@ def display_vocabulary_ui():
             audio_base64 = data.get('audio_base64') 
             definition = data.get('definition', 'N/A')
             
-            expander_title = f"**{word_number}. {word}** — {pronunciation}" # Enhanced visual title
+            expander_title = f"**{word_number}. {word}** — {pronunciation}" 
             
             with st.expander(expander_title):
                 
-                # --- AUDIO PLAYBACK (USES BASE64 MP3 DATA from gTTS) ---
+                # --- AUDIO PLAYBACK ---
                 if audio_base64:
                     audio_data_url = f"data:audio/mp3;base64,{audio_base64}"
                     audio_html = f"""
@@ -809,6 +763,7 @@ def start_new_quiz():
     for question_data in words_pool:
         correct_answer = question_data['definition'].capitalize()
         
+        # Select 3 unique decoys that aren't the correct answer
         decoys = random.sample([
             d for d in all_definitions if d != correct_answer
         ], min(3, len([d for d in all_definitions if d != correct_answer])))
@@ -959,7 +914,6 @@ def generate_quiz_ui():
             del st.session_state.user_responses
             st.rerun()
 
-# 🟢 MODIFIED UI: 2-Minute Drill feature now uses index navigation
 def two_minute_drill_ui():
     """Renders the UI for the 2-Minute Word Briefing feature using sequential navigation."""
     st.header("⏱️ 2-Minute Drill", divider="red")
@@ -970,19 +924,18 @@ def two_minute_drill_ui():
 
     total_words = len(st.session_state.vocab_data)
     
-    # Safely get the current word data based on the index
     current_index = st.session_state.drill_word_index
     if current_index >= total_words:
         st.session_state.drill_word_index = 0
         current_index = 0
         st.rerun()
-    
+        
     selected_word_data = st.session_state.vocab_data[current_index]
     selected_word_str = selected_word_data['word'].upper()
     
     st.markdown(f"**Current Word:** **{current_index + 1}** of **{total_words}**")
 
-    # 🟢 MODIFIED: Fetch permanent audio from the database
+    # Fetch permanent audio from the database
     briefing_text = selected_word_data.get('briefing_text')
     briefing_audio_base64 = selected_word_data.get('briefing_audio_base64')
     
@@ -997,14 +950,13 @@ def two_minute_drill_ui():
         }
         st.success("Briefing content loaded from database.")
     
-    # If content is not in DB AND the user clicks the manual generate button (for missing ones)
+    # If content is not in DB, allow manual generation
     if not briefing_exists_in_db:
         st.warning(f"Briefing content missing for {selected_word_str}. Generate it now!")
-        # 🛑 NOTE: This button uses the manual_briefing_manual function to fill legacy words
         if st.button(f"Generate and Save Briefing for {selected_word_str}", type="primary", key="manual_drill_gen"):
-            # We call the manual batch function with a size of 1 to process this single word immediately.
+            # Call the manual batch function with a size of 1 to process this single word immediately.
             auto_generate_briefings_manual(1) 
-            st.rerun() # Rerun to display the content
+            st.rerun() 
     
     # --- Display Briefing Content ---
     if briefing:
@@ -1016,13 +968,13 @@ def two_minute_drill_ui():
             audio_html = f"""
                 <audio controls style="width: 100%;" src="{audio_data_url}">
                     
-                            Your browser does not support the audio element.
+                        Your browser does not support the audio element.
                 </audio>
             """
             st.markdown(audio_html, unsafe_allow_html=True)
             st.markdown("---")
             
-        # Text Content (with improved formatting)
+        # Text Content 
         st.markdown("##### 🔊 Full Briefing Transcript")
         st.markdown(briefing['text'])
         
@@ -1047,7 +999,6 @@ def admin_extraction_ui():
     """Renders the Admin Extraction and User Management feature."""
     st.header("💡 Data Tools", divider="orange") 
     
-    # 🛑 CRITICAL FIX: Ensure the correct Admin check is used here
     if not st.session_state.is_admin:
         st.warning("You must be logged in as the Admin to use this tool.")
         return
@@ -1056,7 +1007,6 @@ def admin_extraction_ui():
     st.subheader("Manual Word & All Content Entry (Vocabulary, Pronunciation, Briefing)")
     with st.form(key="manual_word_form"):
         manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input").strip()
-        # NOTE: This button now triggers the synchronous fetch of all 3 components
         manual_submit = st.form_submit_button("Generate ALL Content (Slow)")
         
         if manual_submit:
@@ -1064,10 +1014,9 @@ def admin_extraction_ui():
 
     st.markdown("---")
     
-    # 🟢 NEW: BULK AUDIO FIX SECTION
+    # --- BULK AUDIO & BRIEFING FIX SECTION ---
     st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
     
-    # Need to check if vocab_data is loaded before calculating counts
     if st.session_state.vocab_data:
         missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
         missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
@@ -1078,7 +1027,6 @@ def admin_extraction_ui():
     st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
     st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
 
-    # 🟢 Added columns for layout
     col_audio_fix, col_briefing_gen = st.columns(2)
     
     with col_audio_fix:
@@ -1089,7 +1037,6 @@ def admin_extraction_ui():
         )
     
     with col_briefing_gen:
-        # 🟢 MANUAL BULK BRIEFING BUTTON (50 words)
         st.button(
             f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings", 
             on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH), 
@@ -1099,7 +1046,7 @@ def admin_extraction_ui():
 
     st.markdown("---")
 
-    # --- Extraction Control (Manual Only) ---
+    # --- Extraction Control (Bulk Word Generation) ---
     st.subheader("Vocabulary Extraction (Bulk - Generates ALL Content Simultaneously)")
     
     word_count = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
@@ -1111,19 +1058,19 @@ def admin_extraction_ui():
 
     st.markdown("---")
     
-    # 🟢 NEW: Manual Cache Control
+    # --- Manual Cache Control ---
     st.subheader("Manual Data Refresh (Cache Bust)")
     st.info(f"Current Cache Key: `{st.session_state.data_refresh_key}`. Increment to force a full data reload.")
     
     if st.button("Force Clear Cache and Reload Data from Firestore", type="danger", help="Use this if external changes aren't showing or data looks stale."):
         increment_data_refresh_key()
-        st.session_state.vocab_data = None # Clear data to force immediate reload via main()
+        st.session_state.vocab_data = None 
         st.rerun()
 
 
-# ----------------------------------------------------------------------
+# ======================================================================
 # 5. STREAMLIT APPLICATION STRUCTURE
-# ----------------------------------------------------------------------
+# ======================================================================
 
 def main():
     """The main Streamlit application function."""
@@ -1166,11 +1113,9 @@ def main():
                 
     # --- Main Content ---
     
-    # 🛑 CHECK 1: If user is logged in, but data hasn't been loaded in this session yet (vocab_data is None)
+    # 🛑 CHECK 1: Load data if logged in but data is not in session state
     if st.session_state.is_auth and st.session_state.vocab_data is None:
-        # Load the data synchronously (will query Firestore if data_refresh_key changed)
         load_and_update_vocabulary_data() 
-        # Rerun to display the loaded data immediately
         st.rerun()
     
     if not st.session_state.is_auth:

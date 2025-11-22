@@ -124,7 +124,8 @@ class SatWord(BaseModel):
 
 if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
 if 'is_auth' not in st.session_state: st.session_state.is_auth = False
-if 'vocab_data' not in st.session_state: st.session_state.vocab_data = []
+# 🛑 Change 1: vocab_data initialized to None to check if load is needed
+if 'vocab_data' not in st.session_state: st.session_state.vocab_data = None 
 if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'current_page_index' not in st.session_state: st.session_state.current_page_index = 0
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
@@ -137,10 +138,13 @@ if 'is_processing_autotask' not in st.session_state: st.session_state.is_process
 if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None
 
 
-def load_vocabulary_from_firestore():
-    """Loads all vocabulary data from Firestore."""
+# 🟢 Change 2: Caching the Firestore fetch function
+@st.cache_data(show_spinner=False)
+def get_all_vocabulary():
+    """Fetches all vocabulary data from Firestore, optimized by Streamlit caching."""
+    print("Executing full Firestore fetch...") # Debugging confirmation
     try:
-        # 🛑 This is the blocking step that causes slow load times.
+        # 🛑 This synchronous load only happens once per session/cache clear
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
         vocab_list = [doc.to_dict() for doc in docs]
         return vocab_list
@@ -148,11 +152,17 @@ def load_vocabulary_from_firestore():
         st.error(f"🔴 Firestore Load Failed: {e}")
         return []
 
+def load_vocabulary_from_firestore():
+    """Wrapper for the cached function."""
+    return get_all_vocabulary()
+
 def save_word_to_firestore(word_data: Dict):
     """Adds a single word document to the Firestore collection."""
     try:
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
         doc_ref.set(word_data, merge=False)
+        # Invalidate the cache after saving new data
+        get_all_vocabulary.clear() 
         return True
     except Exception as e:
         st.error(f"🔴 Firestore Save Failed for {word_data['word']}: {e}")
@@ -169,6 +179,8 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
             doc_ref.update({
                 'audio_base64': word_data['audio_base64']
             })
+        # Invalidate the cache after updating data (e.g., adding a briefing)
+        get_all_vocabulary.clear() 
         return True
     except Exception as e:
         st.error(f"🔴 Firestore Update Failed for {word_data['word']}: {e}")
@@ -182,7 +194,6 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
 def generate_tts_audio(text: str) -> Optional[str]:
     """Generates audio via gTTS and returns Base64 encoded MP3 data."""
     try:
-        # Source: gTTS Library
         tts = gTTS(text=text, lang='en', slow=False)
         mp3_fp = io.BytesIO()
         tts.write_to_fp(mp3_fp)
@@ -235,7 +246,6 @@ def generate_word_briefing(word_data: Dict, word_index: int):
     word = word_data['word']
     definition = word_data['definition']
     
-    # 🟢 MODIFIED PROMPT: Enforce a much shorter text length for smaller audio file size.
     prompt = f"""
     You are a vocabulary tutor. Write a **short, memorable, and concise briefing (5-6 sentences maximum, about 60-80 words)** on the word '{word}'. 
     
@@ -272,7 +282,6 @@ def generate_word_briefing(word_data: Dict, word_index: int):
             # Update the session state data list with the new briefing content
             st.session_state.vocab_data[word_index].update(briefing_content_to_save)
             
-            # Return full content (text + permanent audio)
             return briefing_content_to_save
         else:
             print(f"Could not save briefing text/audio to Firestore for {word_data['word']}. DOCUMENT MAY BE TOO LARGE.")
@@ -539,16 +548,16 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
 
 def load_and_update_vocabulary_data():
     """
-    Loads data and manages the auto-fetch process for the Admin user.
-    Loads data first, then conditionally triggers background tasks.
+    Loads data into session state using the cached function.
     """
-    if not st.session_state.is_auth: return
+    if not st.session_state.is_auth: return []
     
-    # 1. Always load data quickly on every run
-    st.session_state.vocab_data = load_vocabulary_from_firestore()
+    # 🛑 Load data using the cached function
+    vocab_list = load_vocabulary_from_firestore()
+    st.session_state.vocab_data = vocab_list
     st.session_state.initial_load_done = True
     
-    # 2. Check for missing audio (non-blocking status message)
+    # Check for missing audio (non-blocking status message)
     fill_missing_audio(st.session_state.vocab_data)
         
     word_count = len(st.session_state.vocab_data)
@@ -590,7 +599,7 @@ def handle_auth(action: str, email: str, password: str):
     st.session_state.auto_briefing_done = False # 🟢 Reset auto-briefing flag
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
 
-    # 🛑 VISUAL FIX: Use a spinner for the synchronous load
+    # 🛑 SYNCHRONOUS LOAD WITH VISUAL SPINNER (Only slow on first run/cache clear)
     with st.spinner("Downloading all vocabulary records from Firestore... Please wait."):
         load_and_update_vocabulary_data() 
         
@@ -609,6 +618,8 @@ def handle_logout():
     st.session_state.auto_fetch_done = False
     st.session_state.auto_briefing_done = False # 🟢 Reset auto-briefing flag
     st.session_state.autotask_message = None
+    # 🛑 Clear the cache upon logout to ensure fresh data on next login
+    get_all_vocabulary.clear()
     st.rerun()
 
 # ----------------------------------------------------------------------
@@ -644,7 +655,7 @@ def prev_drill_word():
 def data_board_ui():
     """Displays key metrics and the status of background tasks."""
     
-    if not st.session_state.is_auth or not st.session_state.vocab_data:
+    if not st.session_state.is_auth or st.session_state.vocab_data is None:
         return
     
     word_count = len(st.session_state.vocab_data)
@@ -680,7 +691,7 @@ def display_vocabulary_ui():
     """Renders the Vocabulary Display feature with Paging functionality and improved styling."""
     st.header("📚 Vocabulary Display", divider="blue")
     
-    if not st.session_state.vocab_data:
+    if st.session_state.vocab_data is None or not st.session_state.vocab_data:
         st.info("No vocabulary loaded yet. Please check the Data Tools tab to generate the first batch.")
         return
 
@@ -926,7 +937,7 @@ def two_minute_drill_ui():
     """Renders the UI for the 2-Minute Word Briefing feature using sequential navigation."""
     st.header("⏱️ 2-Minute Drill", divider="red")
 
-    if not st.session_state.vocab_data:
+    if st.session_state.vocab_data is None or not st.session_state.vocab_data:
         st.info("No vocabulary loaded yet. Please generate some words via the Data Tools tab.")
         return
 
@@ -1028,9 +1039,15 @@ def admin_extraction_ui():
     
     # 🟢 NEW: BULK AUDIO FIX SECTION
     st.subheader("Audio Integrity & Bulk Fix")
-    missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
     
+    # Need to check if vocab_data is loaded before calculating counts
+    if st.session_state.vocab_data:
+        missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
+        missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+    else:
+        missing_audio_count = 0
+        missing_briefing_count = 0
+        
     st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
     st.markdown(f"**Missing Briefings (2-Min Drill):** {missing_briefing_count} words.") 
 
@@ -1040,7 +1057,7 @@ def admin_extraction_ui():
     with col_audio_fix:
         st.button(
             "Attempt Bulk Audio Fix (Fix All Missing Pronunciations)", 
-            on_click=handle_bulk_audio_fix, 
+            on_on_click=handle_bulk_audio_fix, 
             type="primary"
         )
     
@@ -1057,7 +1074,9 @@ def admin_extraction_ui():
 
     # --- Extraction Control (Manual Only) ---
     st.subheader("Vocabulary Extraction (Bulk)")
-    st.markdown(f"**Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).")
+    
+    word_count = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
+    st.markdown(f"**Total Words in Database:** `{word_count}` (Target: {REQUIRED_WORD_COUNT}).")
 
     if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): 
         handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False)
@@ -1108,15 +1127,18 @@ def main():
                 
     # --- Main Content ---
     
+    # 🛑 CHECK 1: If user is logged in, but data hasn't been loaded in this session yet (vocab_data is None)
+    if st.session_state.is_auth and st.session_state.vocab_data is None:
+        # Load the data synchronously (will hit the cache if already run once)
+        load_and_update_vocabulary_data() 
+        # Rerun to display the loaded data immediately
+        st.rerun()
+    
     if not st.session_state.is_auth:
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
-        # 1. DATA LOAD: Load data quickly on every run
-        # 🛑 This synchronous load blocks the UI while data is downloaded
-        if not st.session_state.vocab_data:
-            load_and_update_vocabulary_data() 
-        
         # 2. RUN AUTO TASKS (Triggers non-blocking background process for Admin)
+        # This will run instantly if the data is cached, kicking off the fetching loop
         if st.session_state.is_admin and st.session_state.initial_load_done:
             auto_generate_briefings() 
 

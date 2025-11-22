@@ -4,17 +4,17 @@ import random
 import sys
 import os
 import base64
-import urllib.parse 
-import re 
+import urllib.parse
+import re
 from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field, ValidationError
-from pydantic import json_schema 
+from pydantic import json_schema
 
 # --- EXTERNAL API IMPORTS ---
 try:
-    from firebase_admin import credentials, initialize_app, firestore 
-    import firebase_admin 
+    from firebase_admin import credentials, initialize_app, firestore
+    import firebase_admin
 except ImportError:
     st.error("FIREBASE ERROR: The required library 'firebase-admin' is likely missing in requirements.txt.")
     st.stop()
@@ -47,6 +47,7 @@ else:
 
 # Initialize Gemini Client
 try:
+    # API key is automatically picked up from the environment
     gemini_client = genai.Client()
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
@@ -136,14 +137,17 @@ if 'briefing_content_cache' not in st.session_state: st.session_state.briefing_c
 if 'initial_load_done' not in st.session_state: st.session_state.initial_load_done = False
 if 'is_processing_autotask' not in st.session_state: st.session_state.is_processing_autotask = False
 if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None
+# 🟢 CRITICAL FIX: Cache Key for controlled data refresh
+if 'data_refresh_key' not in st.session_state: st.session_state.data_refresh_key = 0
 
 
-# 🟢 CACHING FUNCTION: This heavy operation runs only once per session
+# 🟢 MODIFIED CACHING FUNCTION: Now accepts a key to control cache busting
 @st.cache_data(show_spinner=False)
-def get_all_vocabulary():
+def get_all_vocabulary(cache_key: int):
     """Fetches all vocabulary data from Firestore, optimized by Streamlit caching."""
+    # The function runs only if the cache_key changes.
+    print(f"--- FETCHING DATA: Cache Key {cache_key} changed/not found. Running Firestore query. ---")
     try:
-        # 🛑 This synchronous load only happens once per session/cache clear
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
         vocab_list = [doc.to_dict() for doc in docs]
         return vocab_list
@@ -152,16 +156,22 @@ def get_all_vocabulary():
         return []
 
 def load_vocabulary_from_firestore():
-    """Wrapper for the cached function."""
-    return get_all_vocabulary()
+    """Wrapper for the cached function, passing the session state key."""
+    # 🟢 Use the session state key to control refresh
+    return get_all_vocabulary(st.session_state.data_refresh_key)
+
+def increment_data_refresh_key():
+    """Forces a cache bust on the next data load."""
+    st.session_state.data_refresh_key += 1
 
 def save_word_to_firestore(word_data: Dict):
     """Adds a single word document to the Firestore collection."""
     try:
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
         doc_ref.set(word_data, merge=False)
-        # Invalidate the cache after saving new data
-        get_all_vocabulary.clear() 
+        
+        # 🟢 CRITICAL FIX: Increment key instead of calling .clear()
+        increment_data_refresh_key()
         return True
     except Exception as e:
         print(f"🔴 Firestore Save Failed for {word_data['word']}: {e}")
@@ -178,8 +188,9 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
             doc_ref.update({
                 'audio_base64': word_data['audio_base64']
             })
-        # Invalidate the cache after updating data (e.g., adding a briefing)
-        get_all_vocabulary.clear() 
+        
+        # 🟢 CRITICAL FIX: Increment key instead of calling .clear()
+        increment_data_refresh_key()
         return True
     except Exception as e:
         print(f"🔴 Firestore Update Failed for {word_data['word']}: {e}")
@@ -339,7 +350,7 @@ def handle_manual_word_entry(word: str):
         st.warning(f"Note: LLM corrected the word to '{new_word_data['word']}'. Using LLM's version.")
 
     if save_word_to_firestore(new_word_data):
-        st.session_state.vocab_data.append(new_word_data) # Update state manually
+        # Data is refreshed automatically on next rerun because save_word_to_firestore increments the key
         st.success(f"✅ Successfully added '{new_word_data['word']}' with ALL content to Firebase!")
         st.rerun()
     else:
@@ -364,6 +375,7 @@ def handle_fix_single_audio(word_index: int):
         # Pass update dictionary explicitly
         fields_to_update = {'audio_base64': audio_data}
         if update_word_in_firestore(word_data, fields_to_update):
+            # Update local state immediately before rerun
             st.session_state.vocab_data[word_index].update(fields_to_update)
             st.success(f"✅ Successfully fixed audio for '{word}' and saved to Firebase.")
         else:
@@ -371,6 +383,7 @@ def handle_fix_single_audio(word_index: int):
     else:
         st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
     
+    # Rerun is needed to refresh the page/table
     st.rerun()
 
 def handle_bulk_audio_fix():
@@ -404,10 +417,10 @@ def handle_bulk_audio_fix():
                     fixed_count += 1
                 else:
                     st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
-            # 🛑 Removed time.sleep(0.1) for max speed
-    
     
     if fixed_count > 0:
+        # 🟢 Increment key after successful bulk fix
+        increment_data_refresh_key()
         st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
     else:
         st.error(f"🔴 Bulk fix attempted, but audio generation failed for all {total_count} words or failed to save to Firebase. Check server logs/quotas.")
@@ -434,6 +447,7 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
         successful_saves = 0
         for word_data in new_batch:
             if save_word_to_firestore(word_data):
+                # save_word_to_firestore already increments the key, triggering refresh
                 st.session_state.vocab_data.append(word_data)
                 successful_saves += 1
                 
@@ -482,9 +496,9 @@ def auto_generate_briefings():
             if update_word_in_firestore(word_data, briefing_content):
                 st.session_state.vocab_data[index].update(briefing_content)
                 generated_count += 1
-        
+            
         # 🛑 REMOVED time.sleep(1) to maximize speed
-        
+            
     remaining_words_count = len(words_to_brief_indices) - generated_count
         
     st.session_state.is_processing_autotask = False
@@ -531,12 +545,10 @@ def auto_generate_briefings_manual(batch_size: int):
             briefing_content = generate_full_briefing(word_data)
             
             if briefing_content:
-                 # Update Firestore and Session State
+                # Update Firestore and Session State
                 if update_word_in_firestore(word_data, briefing_content):
                     st.session_state.vocab_data[index].update(briefing_content)
                     generated_count += 1
-            
-            # 🛑 REMOVED time.sleep(1) to maximize speed
             
     st.session_state.autotask_message = f"Manual Bulk Briefing complete: Generated {generated_count} briefings. Please wait for the page to refresh to see the updated count."
     
@@ -558,10 +570,11 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
 def load_and_update_vocabulary_data():
     """
     Loads data into session state using the cached function.
+    This runs on every relevant rerun, but only queries Firestore if the cache key is incremented.
     """
     if not st.session_state.is_auth: return
     
-    # 🛑 Load data using the cached function
+    # 🛑 Load data using the cached function (will query Firestore if data_refresh_key changed)
     vocab_list = load_vocabulary_from_firestore()
     st.session_state.vocab_data = vocab_list
     st.session_state.initial_load_done = True
@@ -604,17 +617,21 @@ def handle_auth(action: str, email: str, password: str):
     st.session_state.is_admin = is_admin
     st.session_state.current_page_index = 0 # Reset word display page
     st.session_state.quiz_start_index = 0
-    st.session_state.drill_word_index = 0 # 🟢 Reset drill word index
-    st.session_state.auto_fetch_done = False # Reset auto-fetch flag
-    st.session_state.auto_briefing_done = False # 🟢 Reset auto-briefing flag
+    st.session_state.drill_word_index = 0 
+    st.session_state.auto_fetch_done = False 
+    st.session_state.auto_briefing_done = False 
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
+    
+    # 🟢 CRITICAL FIX: Increment key on login to guarantee a fresh data fetch
+    increment_data_refresh_key()
 
     # 🛑 SYNCHRONOUS LOAD WITH VISUAL SPINNER (Only slow on first run/cache clear)
     with st.spinner("Downloading all vocabulary records from Firestore... Please wait. This is only slow once per session."):
+        # Load data uses the new key, ensuring a fresh query on initial login
         load_and_update_vocabulary_data() 
         
     st.rerun()
-             
+              
 
 def handle_logout():
     """Handles session state reset."""
@@ -624,12 +641,12 @@ def handle_logout():
     st.session_state.is_admin = False
     st.session_state.current_page_index = 0
     st.session_state.quiz_start_index = 0
-    st.session_state.drill_word_index = 0 # 🟢 Reset drill word index
+    st.session_state.drill_word_index = 0 
     st.session_state.auto_fetch_done = False
-    st.session_state.auto_briefing_done = False # 🟢 Reset auto-briefing flag
+    st.session_state.auto_briefing_done = False 
     st.session_state.autotask_message = None
-    # 🛑 Clear the cache upon logout to ensure fresh data on next login
-    get_all_vocabulary.clear()
+    # 🛑 Reset the refresh key
+    st.session_state.data_refresh_key = 0
     st.rerun()
 
 # ----------------------------------------------------------------------
@@ -998,6 +1015,7 @@ def two_minute_drill_ui():
             audio_data_url = f"data:audio/mp3;base64,{briefing['audio_base64']}"
             audio_html = f"""
                 <audio controls style="width: 100%;" src="{audio_data_url}">
+                    
                             Your browser does not support the audio element.
                 </audio>
             """
@@ -1091,6 +1109,17 @@ def admin_extraction_ui():
     if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): 
         handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False)
 
+    st.markdown("---")
+    
+    # 🟢 NEW: Manual Cache Control
+    st.subheader("Manual Data Refresh (Cache Bust)")
+    st.info(f"Current Cache Key: `{st.session_state.data_refresh_key}`. Increment to force a full data reload.")
+    
+    if st.button("Force Clear Cache and Reload Data from Firestore", type="danger", help="Use this if external changes aren't showing or data looks stale."):
+        increment_data_refresh_key()
+        st.session_state.vocab_data = None # Clear data to force immediate reload via main()
+        st.rerun()
+
 
 # ----------------------------------------------------------------------
 # 5. STREAMLIT APPLICATION STRUCTURE
@@ -1139,7 +1168,7 @@ def main():
     
     # 🛑 CHECK 1: If user is logged in, but data hasn't been loaded in this session yet (vocab_data is None)
     if st.session_state.is_auth and st.session_state.vocab_data is None:
-        # Load the data synchronously (will hit the cache if already run once)
+        # Load the data synchronously (will query Firestore if data_refresh_key changed)
         load_and_update_vocabulary_data() 
         # Rerun to display the loaded data immediately
         st.rerun()

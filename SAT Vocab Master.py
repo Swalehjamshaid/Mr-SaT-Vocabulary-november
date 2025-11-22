@@ -272,7 +272,7 @@ def generate_word_briefing(word_data: Dict, word_index: int):
                 model="gemini-2.5-flash", contents=prompt
             )
             briefing_text = response.text.strip()
-        
+            
         # --- Generate Audio for the entire briefing (DYNAMICALLY, NOT STORED) ---
         with st.spinner("Generating full audio for the briefing..."):
             # This generates the audio needed for immediate playback
@@ -803,7 +803,7 @@ def generate_quiz_ui():
     
     with st.form(key="full_quiz_form"):
         st.subheader(f"Answer the following {QUIZ_SIZE} questions:")
-        st.caption(f"Testing words **start_word_num** to **end_word_num**.")
+        st.caption(f"Testing words **{start_word_num}** to **{end_word_num}**.")
         
         st.session_state.user_responses = [] 
         
@@ -926,17 +926,17 @@ def two_minute_drill_ui():
     if briefing:
         st.subheader(f"Deep Dive: {selected_word_str}")
         
-        # Audio Player
+        # Audio Player - FIX APPLIED: REMOVED 'autoplay'
         if briefing['audio_base64']:
             audio_data_url = f"data:audio/mp3;base64,{briefing['audio_base64']}"
             audio_html = f"""
-                <audio controls autoplay style="width: 100%; margin-bottom: 15px;" src="{audio_data_url}">
+                <audio controls style="width: 100%; margin-bottom: 15px;" src="{audio_data_url}">
                     Your browser does not support the audio element.
                 </audio>
             """
             st.markdown(audio_html, unsafe_allow_html=True)
             st.markdown("---")
-        
+            
         # Text Content (with improved formatting)
         st.markdown("##### 🔊 Full Briefing Transcript")
         st.markdown(briefing['text'])

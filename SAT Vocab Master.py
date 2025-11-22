@@ -103,15 +103,12 @@ except Exception as e:
 
 
 # --- App State and Constants ---
-# 🟢 TARGET SIZE RESTORED TO 2000
 REQUIRED_WORD_COUNT = 2000 
 LOAD_BATCH_SIZE = 10 
 AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT 
 QUIZ_SIZE = 5 
-# 🟢 Auto-fetching threshold (e.g., if less than 50 words, fetch 25)
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25 
-# 🟢 NEW: Batch size for auto-generating 2-Minute Briefings
 BRIEFING_BATCH_SIZE = 5
 
 # Admin Configuration (Mock Login)
@@ -129,8 +126,11 @@ class SatWord(BaseModel):
     sat_level: str = Field(default="High", description="Should always be 'High'.")
     audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
     created_at: float = Field(default_factory=time.time)
-    # 🟢 Fields for the 2-Minute Drill content (briefing_audio_base64 is NOW REMOVED from the schema)
+    
+    # 🟢 MODIFIED FIELD: Re-added to store audio permanently
     briefing_text: Optional[str] = Field(default=None, description="The extended AI-generated briefing text.")
+    briefing_audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for the briefing.")
+
 
 # ----------------------------------------------------------------------
 # 2. DATA PERSISTENCE & STATE MANAGEMENT (FIREBASE FIRESTORE)
@@ -143,15 +143,13 @@ if 'quiz_active' not in st.session_state: st.session_state.quiz_active = False
 if 'current_page_index' not in st.session_state: st.session_state.current_page_index = 0
 if 'quiz_start_index' not in st.session_state: st.session_state.quiz_start_index = 0
 if 'is_admin' not in st.session_state: st.session_state.is_admin = False
-# 🟢 State for the 2-Minute Drill feature 
 if 'drill_word_index' not in st.session_state: st.session_state.drill_word_index = 0
-# 🟢 NEW: Flag to track auto-briefing status
 if 'auto_briefing_done' not in st.session_state: st.session_state.auto_briefing_done = False
-# 🟢 NEW: Store generated briefing content temporarily with audio
-if 'briefing_content_cache' not in st.session_state: st.session_state.briefing_content_cache = {}
-# 🟢 NEW: Flag to control when auto-tasks run after initial load
+# 🟢 CHANGE: briefing_content_cache no longer needed since data is permanent
+if 'briefing_content_cache' not in st.session_state: st.session_state.briefing_content_cache = {} 
 if 'initial_load_done' not in st.session_state: st.session_state.initial_load_done = False
 if 'is_processing_autotask' not in st.session_state: st.session_state.is_processing_autotask = False
+if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None # For status board
 
 
 def load_vocabulary_from_firestore():
@@ -168,9 +166,8 @@ def save_word_to_firestore(word_data: Dict):
     """Adds a single word document to the Firestore collection."""
     try:
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
-        # Use a subset of the fields for initial saving, exclude large briefing content
-        data_to_save = {k: v for k, v in word_data.items() if k != 'briefing_audio_base64'}
-        doc_ref.set(data_to_save, merge=False)
+        # All fields are now saved, including audio base64 data
+        doc_ref.set(word_data, merge=False)
         return True
     except Exception as e:
         st.error(f"🔴 Firestore Save Failed for {word_data['word']}: {e}")
@@ -182,10 +179,7 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
         
         if fields_to_update:
-            # 🛑 CRITICAL CHECK: Remove the large audio field if present before updating Firestore
-            if 'briefing_audio_base64' in fields_to_update:
-                del fields_to_update['briefing_audio_base64']
-                
+            # Save the new fields, including the briefing audio
             doc_ref.update(fields_to_update)
         else:
             # Default update (used for audio fix in older version)
@@ -206,7 +200,8 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
 def generate_tts_audio(text: str) -> Optional[str]:
     """Generates audio via gTTS and returns Base64 encoded MP3 data."""
     try:
-        # gTTS has a max character limit, typically 5000. 
+        # gTTS produces a VBR MP3 stream. We cannot control bitrate for size reduction.
+        # The only way to reduce size is to reduce the length of 'text'.
         tts = gTTS(text=text, lang='en', slow=False)
         mp3_fp = io.BytesIO()
         tts.write_to_fp(mp3_fp)
@@ -252,54 +247,53 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
 
 # 🟢 CORE LLM FUNCTION: Generates detailed briefing (Used by both manual/auto)
 def generate_word_briefing(word_data: Dict, word_index: int):
-    """Generates a detailed 2-minute text briefing and its audio counterpart, saving text to Firestore."""
+    """
+    Generates a detailed briefing, including text and PERMANENT Base64 audio, saving both to Firestore.
+    """
     word = word_data['word']
     definition = word_data['definition']
     
-    # 🟢 MODIFIED PROMPT: Ensure the text is concise (approx 150 words/8-10 sentences) to guarantee it fits in Firestore.
+    # 🟢 MODIFIED PROMPT: Enforce a much shorter text length for smaller audio file size.
     prompt = f"""
-    You are a vocabulary tutor. Write a **concise, engaging, and persuasive briefing (8-10 sentences maximum)** on the word '{word}'. The text must be perfect for a short audio presentation.
+    You are a vocabulary tutor. Write a **short, memorable, and concise briefing (5-6 sentences maximum, about 60-80 words)** on the word '{word}'. 
     
     The briefing must seamlessly include:
     1. The core definition: {definition}.
-    2. A brief note on its origin or etymology.
-    3. Two complex example sentences demonstrating high-level usage.
+    2. A brief note on its origin or etymology (1 sentence).
+    3. One compelling example sentence demonstrating high-level usage.
     4. A final, memorable takeaway.
     
     Ensure the entire text is conversational and suitable for speech synthesis. Do not use bullet points or lists; write it as a continuous, flowing speech.
     """
     
     try:
-        # We don't use st.spinner here for the AI call because this runs inside the auto-task.
+        # 1. Generate Briefing Text
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash", contents=prompt
         )
         briefing_text = response.text.strip()
             
-        # --- Generate Audio for the entire briefing (DYNAMICALLY, NOT STORED) ---
-        # No st.spinner for TTS call either, as it runs in the background.
+        # 2. Generate Briefing Audio (Blocking Operation)
         audio_data = generate_tts_audio(briefing_text)
             
         if not audio_data:
             raise Exception("Failed to generate TTS audio.")
 
-        # 🛑 ONLY STORE TEXT IN FIREBASE (briefing_text)
+        # 3. Data to Save
         briefing_content_to_save = {
-            "briefing_text": briefing_text
+            "briefing_text": briefing_text,
+            "briefing_audio_base64": audio_data  # 🟢 PERMANENTLY STORED
         }
         
-        # 🟢 CRITICAL STEP: Save only the text content back to Firestore
+        # 4. CRITICAL STEP: Save both text and audio content back to Firestore
         if update_word_in_firestore(word_data, briefing_content_to_save):
             # Update the session state data list with the new briefing content
             st.session_state.vocab_data[word_index].update(briefing_content_to_save)
             
-            # Return full content (text + dynamic audio) for immediate display
-            return {
-                "text": briefing_text,
-                "audio_base64": audio_data
-            }
+            # Return full content (text + permanent audio)
+            return briefing_content_to_save
         else:
-            print(f"Could not save briefing text to Firestore for {word_data['word']}.")
+            print(f"Could not save briefing text/audio to Firestore for {word_data['word']}.")
             return None
         
     except Exception as e:
@@ -459,10 +453,10 @@ def auto_generate_briefings():
     if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
 
-    # Check only for words missing the *text*, as the audio is dynamic
+    # Check only for words missing the *text*, as the audio is now permanently stored
     words_to_brief_indices = [
         i for i, d in enumerate(st.session_state.vocab_data) 
-        if not d.get('briefing_text')
+        if not d.get('briefing_audio_base64') # 🟢 CHECKING FOR AUDIO B64 PRESENCE
     ]
     
     if not words_to_brief_indices:
@@ -475,8 +469,7 @@ def auto_generate_briefings():
     # Select the first BRIEFING_BATCH_SIZE words to process
     batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
     
-    # 🛑 CRITICAL CHANGE: Use st.warning to show process status, but run seamlessly.
-    # The message is displayed, but the blocking API calls are now contained.
+    st.session_state.autotask_message = f"Admin Auto-Task: Generating {len(batch_indices)} missing 2-Minute Briefings..."
     
     generated_count = 0
     
@@ -484,7 +477,7 @@ def auto_generate_briefings():
     for index in batch_indices:
         word_data = st.session_state.vocab_data[index]
         
-        # NOTE: generate_word_briefing runs the LLM call and TTS
+        # NOTE: generate_word_briefing runs the LLM call and TTS, saves to Firestore
         briefing = generate_word_briefing(word_data, index)
         
         if briefing:
@@ -508,7 +501,7 @@ def auto_generate_briefings():
         # Final rerun to update the data board counts
         st.rerun()
 
-# 🟢 NEW FUNCTION: Manual wrapper for bulk briefing generation
+# 🟢 MANUAL BATCH GENERATION
 def auto_generate_briefings_manual():
     """
     Manually triggers a single batch generation of missing briefing content 
@@ -517,7 +510,7 @@ def auto_generate_briefings_manual():
     
     words_to_brief_indices = [
         i for i, d in enumerate(st.session_state.vocab_data)  
-        if not d.get('briefing_text')
+        if not d.get('briefing_audio_base64') # 🟢 CHECKING FOR AUDIO B64 PRESENCE
     ]
     
     if not words_to_brief_indices:
@@ -533,16 +526,15 @@ def auto_generate_briefings_manual():
     generated_count = 0
     
     # Process the batch
-    with st.spinner(f"Generating briefing text and dynamic audio for {len(batch_indices)} words..."):
+    with st.spinner(f"Generating briefing text and audio for {len(batch_indices)} words..."):
         for index in batch_indices:
             word_data = st.session_state.vocab_data[index]
             
-            # NOTE: generate_word_briefing handles LLM call, TTS, and saving back to Firestore/session state
+            # NOTE: generate_word_briefing handles LLM call, TTS, and saves to Firestore
             briefing = generate_word_briefing(word_data, index)
             
             if briefing:
                 generated_count += 1
-                # Use print/log instead of st.toast inside synchronous block
             
             time.sleep(1) # Add delay to respect API limits
             
@@ -589,10 +581,6 @@ def load_and_update_vocabulary_data():
         # This part is blocking but critical for initial functionality.
         handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
         return # Stop execution here to allow extraction to complete
-
-    # 4. AUTO-FETCH LOGIC FOR ADMIN (Briefing Generation)
-    # This task is now handled by the separate, continuous auto_generate_briefings()
-    # It will be called immediately after this function returns in the main loop.
 
 
 def handle_auth(action: str, email: str, password: str):
@@ -642,7 +630,6 @@ def handle_logout():
 # 4. UI COMPONENTS: VOCABULARY, QUIZ, ADMIN
 # ----------------------------------------------------------------------
 
-# ... (Navigation functions go here) ...
 def go_to_next_page():
     """Advances the displayed word page index."""
     st.session_state.current_page_index += 1
@@ -677,7 +664,8 @@ def data_board_ui():
     
     word_count = len(st.session_state.vocab_data)
     missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_text')])
+    # 🟢 CHECKING FOR BRIEFING AUDIO B64 PRESENCE
+    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
     
     st.header("📊 Application Status Board")
     
@@ -691,18 +679,14 @@ def data_board_ui():
         st.metric(label="Words Missing Briefing", value=missing_briefing_count)
     with cols[3]:
         # Display auto-task status
-        if st.session_state.get('autotask_message'):
-            status_text = st.session_state.autotask_message
-            if "processing next batch" in status_text or "Generating" in status_text:
-                 st.info(status_text)
-            elif "complete" in status_text:
-                 st.success(status_text)
-            else:
-                 st.markdown(f"**Status:** {status_text}")
-        elif st.session_state.is_admin and not st.session_state.auto_briefing_done:
-            st.info("Auto-tasks are running or checking data...")
+        status_message = st.session_state.get('autotask_message', "System Idle/Complete.")
+        
+        if "processing next batch" in status_message or "Generating" in status_message:
+             st.info(f"Status: {status_message}")
+        elif "complete" in status_message or "Idle" in status_message:
+             st.success(f"Status: {status_message}")
         else:
-            st.info("System Idle/Briefings Complete.")
+             st.markdown(f"**Status:** {status_message}")
             
     st.markdown("---")
 
@@ -771,19 +755,15 @@ def display_vocabulary_ui():
     # --- PAGINATION CONTROLS ---
     col_prev, col_status, col_next = st.columns([1, 2, 1])
     
-    # Previous Button
     with col_prev:
         if st.session_state.current_page_index > 0:
             st.button("⬅️ Previous 10 Words", on_click=go_to_prev_page)
     
-    # Status
     with col_status:
-        # Displaying the current page number
         current_page = st.session_state.current_page_index + 1
         total_pages = (total_words + LOAD_BATCH_SIZE - 1) // LOAD_BATCH_SIZE
         st.markdown(f"<div style='text-align: center; padding-top: 10px;'>Page {current_page} of {total_pages}</div>", unsafe_allow_html=True)
 
-    # Next Button
     with col_next:
         if end_index < total_words:
             st.button("Next 10 Words ➡️", on_click=go_to_next_page, type="secondary")
@@ -979,45 +959,28 @@ def two_minute_drill_ui():
     
     st.markdown(f"**Current Word:** **{current_index + 1}** of **{total_words}**")
 
-    # Check if briefing already exists in the database record (only check for text)
+    # 🟢 MODIFIED: Fetch permanent audio from the database
     briefing_text = selected_word_data.get('briefing_text')
-    briefing_exists_in_db = bool(briefing_text)
-
-    # --- Generation/Display Logic ---
+    briefing_audio_base64 = selected_word_data.get('briefing_audio_base64')
     
+    briefing_exists_in_db = bool(briefing_audio_base64)
+
     briefing = None
     
     if briefing_exists_in_db:
-        # Check cache first for dynamic audio
-        cache_key = selected_word_str
-        if cache_key in st.session_state.briefing_content_cache:
-            briefing = st.session_state.briefing_content_cache[cache_key]
-            st.success("Briefing loaded from cache.")
-        else:
-            # 🟢 Generate audio dynamically if text exists in DB but audio is not in cache
-            with st.spinner(f"Generating audio for {selected_word_str}..."):
-                audio_data = generate_tts_audio(briefing_text)
-            
-            if audio_data:
-                briefing = {
-                    "text": briefing_text,
-                    "audio_base64": audio_data
-                }
-                st.session_state.briefing_content_cache[cache_key] = briefing
-                st.info("Briefing audio generated dynamically.")
-            else:
-                st.error("Could not generate audio dynamically. Try again.")
-
+        briefing = {
+            "text": briefing_text,
+            "audio_base64": briefing_audio_base64 
+        }
+        st.success("Briefing content loaded from database.")
     
     # If content is not in DB AND the user clicks the manual generate button (for missing ones)
     if not briefing_exists_in_db:
         st.warning(f"Briefing content missing for {selected_word_str}. Generate it now!")
         if st.button(f"Generate and Save Briefing for {selected_word_str}", type="primary", key="manual_drill_gen"):
-            # Generate and Save content to the database (only text)
-            # This function returns the full briefing content (text + dynamic audio)
+            # NOTE: This function now saves the audio permanently.
             briefing = generate_word_briefing(selected_word_data, current_index)
             if briefing:
-                st.session_state.briefing_content_cache[selected_word_str] = briefing
                 st.toast(f"Briefing generated and saved for {selected_word_str}!")
             else:
                 st.error("Could not generate or save content.")
@@ -1027,7 +990,7 @@ def two_minute_drill_ui():
     if briefing:
         st.subheader(f"Deep Dive: {selected_word_str}")
         
-        # Audio Player - FIX APPLIED: REMOVED 'autoplay'
+        # Audio Player
         if briefing['audio_base64']:
             audio_data_url = f"data:audio/mp3;base64,{briefing['audio_base64']}"
             audio_html = f"""
@@ -1080,8 +1043,11 @@ def admin_extraction_ui():
     
     # 🟢 NEW: BULK AUDIO FIX SECTION
     st.subheader("Audio Integrity & Bulk Fix")
-    st.markdown(f"**Corrupted Entries (Pronunciation):** {len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])} words.")
-    st.markdown(f"**Missing Briefings (2-Min Drill):** {len([d for d in st.session_state.vocab_data if not d.get('briefing_text')])} words.") 
+    missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
+    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+    
+    st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
+    st.markdown(f"**Missing Briefings (2-Min Drill):** {missing_briefing_count} words.") 
 
     # 🟢 Added columns for layout
     col_audio_fix, col_briefing_gen = st.columns(2)
@@ -1094,7 +1060,7 @@ def admin_extraction_ui():
         )
     
     with col_briefing_gen:
-        # 🟢 NEW MANUAL BRIEFING BUTTON
+        # 🟢 MANUAL BRIEFING BUTTON
         st.button(
             "Force Generate Missing 2-Min Briefings (Batch)", 
             on_click=auto_generate_briefings_manual, # Manual call
@@ -1160,11 +1126,11 @@ def main():
     if not st.session_state.is_auth:
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
-        # 1. INITIAL LOAD: Ensure data is loaded (fast operation)
+        # 1. DATA LOAD: Load data quickly on every run
         if not st.session_state.vocab_data:
             load_and_update_vocabulary_data() 
         
-        # 2. RUN AUTO TASKS (Non-blocking part is triggered here)
+        # 2. RUN AUTO TASKS (Triggers non-blocking background process for Admin)
         if st.session_state.is_admin and st.session_state.initial_load_done:
             auto_generate_briefings() 
 

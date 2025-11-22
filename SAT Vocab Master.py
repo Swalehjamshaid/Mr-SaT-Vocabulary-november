@@ -136,7 +136,6 @@ if 'data_refresh_key' not in st.session_state: st.session_state.data_refresh_key
 @st.cache_data(show_spinner=False)
 def get_all_vocabulary(cache_key: int) -> List[Dict]:
     """Fetches all vocabulary data from Firestore, optimized by Streamlit caching."""
-    # The function runs only if the cache_key changes.
     print(f"--- FETCHING DATA: Cache Key {cache_key} changed/not found. Running Firestore query. ---")
     try:
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
@@ -205,7 +204,6 @@ def generate_full_briefing(word_data: Dict) -> Optional[Dict]:
     word = word_data.get('word', 'a high-level word')
     definition = word_data.get('definition', 'a complex meaning')
     
-    # Prompt is designed for a concise 60-80 word briefing
     prompt = f"""
     You are a vocabulary tutor. Write a **short, memorable, and concise briefing (5-6 sentences maximum, about 60-80 words)** on the word '{word}'. 
     
@@ -247,7 +245,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     """
     Calls Gemini to generate base structured vocabulary and then synchronously
     generates word pronunciation and the FULL 2-Minute briefing and audio.
-    This ensures all required data is fetched before saving.
     """
     
     prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
@@ -282,7 +279,6 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
             if briefing_content:
                 word_data.update(briefing_content)
             else:
-                # Still save the base word, but briefing is missing
                 print(f"Warning: Briefing generation failed for {word_data['word']}. It will be tagged for legacy fix.")
             
             final_words.append(word_data)
@@ -521,6 +517,7 @@ def auto_generate_briefings_manual(batch_size: int):
     
     # Force a rerun to reload state/data and update the displayed counts
     st.rerun()
+    return
 
 
 def fill_missing_audio(vocab_data: List[Dict]) -> bool:
@@ -1058,7 +1055,7 @@ def admin_extraction_ui():
 
     st.markdown("---")
     
-    # --- Manual Cache Control ---
+    # --- Manual Cache Control (FIXED) ---
     st.subheader("Manual Data Refresh (Cache Bust)")
     st.info(f"Current Cache Key: `{st.session_state.data_refresh_key}`. Increment to force a full data reload.")
     
@@ -1066,6 +1063,7 @@ def admin_extraction_ui():
         increment_data_refresh_key()
         st.session_state.vocab_data = None 
         st.rerun()
+        return # 🛑 FIX: Explicit return to stop execution and prevent StreamlitAPIException
 
 
 # ======================================================================

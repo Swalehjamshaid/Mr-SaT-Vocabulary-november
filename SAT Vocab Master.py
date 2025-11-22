@@ -140,6 +140,7 @@ if 'autotask_message' not in st.session_state: st.session_state.autotask_message
 def load_vocabulary_from_firestore():
     """Loads all vocabulary data from Firestore."""
     try:
+        # 🛑 This is the blocking step that causes slow load times.
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
         vocab_list = [doc.to_dict() for doc in docs]
         return vocab_list
@@ -589,8 +590,10 @@ def handle_auth(action: str, email: str, password: str):
     st.session_state.auto_briefing_done = False # 🟢 Reset auto-briefing flag
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
 
-    # Initial data load
-    load_and_update_vocabulary_data() 
+    # 🛑 VISUAL FIX: Use a spinner for the synchronous load
+    with st.spinner("Downloading all vocabulary records from Firestore... Please wait."):
+        load_and_update_vocabulary_data() 
+        
     st.rerun()
              
 
@@ -1109,6 +1112,7 @@ def main():
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
         # 1. DATA LOAD: Load data quickly on every run
+        # 🛑 This synchronous load blocks the UI while data is downloaded
         if not st.session_state.vocab_data:
             load_and_update_vocabulary_data() 
         

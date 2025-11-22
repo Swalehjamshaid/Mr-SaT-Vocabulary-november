@@ -95,8 +95,10 @@ AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25 
-# 🟢 OPTIMIZATION: Increased Batch Size for faster throughput
+# 🟢 OPTIMIZATION: Continuous Auto-Fetch Batch Size
 BRIEFING_BATCH_SIZE = 10 
+# 🟢 NEW: Manual Bulk Fetch Size
+MANUAL_BRIEFING_BATCH = 50 
 
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
@@ -394,7 +396,7 @@ def handle_bulk_audio_fix():
                     fixed_count += 1
                 else:
                     st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
-            # 🛑 REMOVED time.sleep(0.1)
+            # 🛑 Removed time.sleep(0.1) for max speed
     
     
     if fixed_count > 0:
@@ -437,10 +439,9 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
 
 def auto_generate_briefings():
     """
-    Scans for words missing briefing content and auto-generates for a batch, 
+    🟢 AUTO-FETCH: Scans for words missing briefing content and auto-generates for a batch, 
     forcing a silent rerun if more work is pending. This is non-blocking.
     """
-    # 🟢 Auto-fetch function
     if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
 
@@ -491,10 +492,10 @@ def auto_generate_briefings():
         # Final rerun to update the data board counts
         st.rerun()
 
-# 🟢 MANUAL BATCH GENERATION
-def auto_generate_briefings_manual():
+# 🟢 MANUAL BATCH GENERATION (The new function for 50 words)
+def auto_generate_briefings_manual(batch_size: int):
     """
-    Manually triggers a single batch generation of missing briefing content 
+    Manually triggers a large batch generation of missing briefing content 
     and forces a rerun to update the word counts in the Admin UI.
     """
     
@@ -508,10 +509,10 @@ def auto_generate_briefings_manual():
         st.rerun()
         return
 
-    # Select the first BRIEFING_BATCH_SIZE words to process
-    batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
+    # Select the first 'batch_size' words to process
+    batch_indices = words_to_brief_indices[:batch_size]
     
-    st.session_state.autotask_message = f"Status: Manually starting batch generation for {len(batch_indices)} missing briefings..."
+    st.session_state.autotask_message = f"Status: Manually starting bulk generation for {len(batch_indices)} missing briefings (Batch Size {batch_size})..."
     
     generated_count = 0
     
@@ -528,7 +529,7 @@ def auto_generate_briefings_manual():
             
             # 🛑 REMOVED time.sleep(1) to maximize speed
             
-    st.session_state.autotask_message = f"Manual Briefing complete: Generated {generated_count} briefings."
+    st.session_state.autotask_message = f"Manual Bulk Briefing complete: Generated {generated_count} briefings. Please wait for the page to refresh to see the updated count."
     
     # Force a rerun to reload state/data and update the displayed counts
     st.rerun()
@@ -1063,9 +1064,10 @@ def admin_extraction_ui():
     
     with col_briefing_gen:
         # 🟢 MANUAL BRIEFING BUTTON (Bulk Extraction of Briefings)
+        # Using a lambda function to pass the MANUAL_BRIEFING_BATCH size (50) to the generic function
         st.button(
-            "Force Generate Missing 2-Min Briefings (Batch)", 
-            on_click=auto_generate_briefings_manual, # Manual call
+            f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings", 
+            on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH), 
             type="secondary"
         )
 

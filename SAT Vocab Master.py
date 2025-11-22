@@ -89,7 +89,7 @@ AUTO_FETCH_THRESHOLD = 50
 AUTO_FETCH_BATCH = 25 
 BRIEFING_BATCH_SIZE = 10 
 MANUAL_BRIEFING_BATCH = 50 
-MANUAL_EXTRACT_BASE_BATCH = 50 # New constant for base word extraction
+MANUAL_EXTRACT_BASE_BATCH = 50 
 
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
@@ -334,9 +334,10 @@ def handle_manual_word_entry(word: str):
 
 def auto_generate_briefings():
     """
-    AUTO-TASK: Admin background task to process LEGACY words missing the 2-minute briefing.
-    This runs in batches on consecutive reruns to avoid timeouts.
+    AUTO-TASK: Admin background task to process LEGACY words/NEWLY ADDED words 
+    missing the 2-minute briefing. This runs in batches on consecutive reruns.
     """
+    # Guards: 1. Must be Admin. 2. Not already flagged as complete. 3. Not currently running a task.
     if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
 
@@ -374,7 +375,7 @@ def auto_generate_briefings():
     
     if remaining_words_count > 0:
         st.session_state.autotask_message = f"✅ Auto-Briefing completed a batch of {generated_count}. {remaining_words_count} remaining. Processing next LEGACY batch..."
-        st.rerun() 
+        st.rerun() # Trigger continuous fetching
     else:
         st.session_state.auto_briefing_done = True
         st.session_state.autotask_message = f"✅ Auto-Briefing complete: All {len(st.session_state.vocab_data)} words now have briefings."
@@ -417,7 +418,7 @@ def auto_generate_briefings_manual(batch_size: int):
 
 def handle_admin_extraction_button_base(num_words: int, auto_fetch: bool = False):
     """
-    Handles the bulk extraction of Vocabulary and Pronunciation ONLY.
+    Handles the bulk extraction of Vocabulary and Pronunciation ONLY (FAST FETCH).
     """
     status_message = f"Extracting {num_words} new base words (Vocabulary & Pronunciation ONLY)..."
 
@@ -425,7 +426,6 @@ def handle_admin_extraction_button_base(num_words: int, auto_fetch: bool = False
     
     existing_words = [d['word'] for d in st.session_state.vocab_data if st.session_state.vocab_data]
     
-    # 🛑 CALLS THE NEW, FASTER EXTRACTION FUNCTION
     new_batch = real_llm_vocabulary_and_pronunciation_extraction(num_words, existing_words) 
     
     if new_batch:
@@ -530,9 +530,8 @@ def load_and_update_vocabulary_data():
         st.info("Database is empty. Please use the 'Data Tools' tab to extract the first batch of words.")
 
     # 3. AUTO-FETCH LOGIC FOR ADMIN (Initial Vocabulary Extraction)
-    # The original full extraction logic is removed here and replaced by the new base extraction
-    if st.session_state.is_admin and word_count < AUTO_FETCH_THRESHOLD and 'auto_fetch_done' not in st.session_state:
-        # Use the base extraction for auto-fetch to make it faster
+    # This automatically increases the total word count if below the threshold.
+    if st.session_state.is_admin and word_count < REQUIRED_WORD_COUNT and 'auto_fetch_done' not in st.session_state:
         handle_admin_extraction_button_base(AUTO_FETCH_BATCH, auto_fetch=True)
         return 
 
@@ -1023,7 +1022,7 @@ def admin_extraction_ui():
     st.subheader("Manual Data Refresh (Cache Bust)")
     st.info(f"Current Cache Key: `{st.session_state.data_refresh_key}`. Increment to force a full data reload.")
     
-    # 🛑 THIS IS THE FIX: The explicit return stops execution after st.rerun()
+    # 🛑 THIS IS THE FIX FOR StreamlitAPIException: The explicit return after st.rerun()
     if st.button("Force Clear Cache and Reload Data from Firestore", type="danger", help="Use this if external changes aren't showing or data looks stale."):
         increment_data_refresh_key()
         st.session_state.vocab_data = None 
@@ -1077,6 +1076,7 @@ def main():
     # --- Main Content ---
     
     # 🛑 Load data if logged in but data is not in session state (or cache key changed)
+    # This block ensures data is loaded on the rerun immediately following login.
     if st.session_state.is_auth and st.session_state.vocab_data is None:
         with st.spinner("Downloading all vocabulary records from Firestore... Please wait."):
             load_and_update_vocabulary_data() 
@@ -1086,6 +1086,7 @@ def main():
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
         # 2. RUN AUTO TASKS (Continuous Background Fetching for Admin)
+        # This automatically fetches new base words and generates missing briefings in small batches.
         if st.session_state.is_admin and st.session_state.initial_load_done:
             auto_generate_briefings() 
 

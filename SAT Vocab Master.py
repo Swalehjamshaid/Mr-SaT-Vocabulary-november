@@ -97,7 +97,7 @@ AUTO_FETCH_THRESHOLD = 50
 AUTO_FETCH_BATCH = 25 
 # 🟢 OPTIMIZATION: Continuous Auto-Fetch Batch Size
 BRIEFING_BATCH_SIZE = 10 
-# 🟢 NEW: Manual Bulk Fetch Size
+# 🟢 NEW: Manual Bulk Fetch Size for 50 words
 MANUAL_BRIEFING_BATCH = 50 
 
 # Admin Configuration (Mock Login)
@@ -1063,8 +1063,7 @@ def admin_extraction_ui():
         )
     
     with col_briefing_gen:
-        # 🟢 MANUAL BRIEFING BUTTON (Bulk Extraction of Briefings)
-        # Using a lambda function to pass the MANUAL_BRIEFING_BATCH size (50) to the generic function
+        # 🟢 MANUAL BULK BRIEFING BUTTON (50 words)
         st.button(
             f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings", 
             on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH), 

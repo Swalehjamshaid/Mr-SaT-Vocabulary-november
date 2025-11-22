@@ -127,7 +127,7 @@ class SatWord(BaseModel):
     audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for pronunciation.")
     created_at: float = Field(default_factory=time.time)
     
-    # 🟢 PERMANENTLY STORED
+    # 🟢 PERMANENTLY STORED BRIEFING FIELDS
     briefing_text: Optional[str] = Field(default=None, description="The extended AI-generated briefing text.")
     briefing_audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for the briefing.")
 
@@ -154,7 +154,7 @@ if 'autotask_message' not in st.session_state: st.session_state.autotask_message
 def load_vocabulary_from_firestore():
     """Loads all vocabulary data from Firestore."""
     try:
-        # 🛑 THIS IS THE SLOW STEP: Synchronously loads all data.
+        # 🛑 THIS IS THE SLOW STEP
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
         vocab_list = [doc.to_dict() for doc in docs]
         return vocab_list
@@ -199,7 +199,7 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Optional[Dict] =
 def generate_tts_audio(text: str) -> Optional[str]:
     """Generates audio via gTTS and returns Base64 encoded MP3 data."""
     try:
-        # gTTS produces a VBR MP3 stream. We cannot control bitrate for size reduction.
+        # Source: gTTS Library
         tts = gTTS(text=text, lang='en', slow=False)
         mp3_fp = io.BytesIO()
         tts.write_to_fp(mp3_fp)
@@ -243,10 +243,11 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     return words_with_audio
 
-# 🟢 CORE LLM FUNCTION: Generates detailed briefing (Used by both manual/auto)
+# 🟢 CORE LLM FUNCTION: Generates detailed briefing
 def generate_word_briefing(word_data: Dict, word_index: int):
     """
-    Generates a detailed briefing, including text and PERMANENT Base64 audio, saving both to Firestore.
+    Generates a detailed briefing, including text (Source: Gemini) and PERMANENT Base64 audio (Source: gTTS), 
+    saving both to Firestore.
     """
     word = word_data['word']
     definition = word_data['definition']
@@ -283,7 +284,7 @@ def generate_word_briefing(word_data: Dict, word_index: int):
             "briefing_audio_base64": audio_data  # 🟢 PERMANENTLY STORED
         }
         
-        # 4. CRITICAL STEP: Save both text and audio content back to Firestore
+        # 4. Storage: Update Firestore
         if update_word_in_firestore(word_data, briefing_content_to_save):
             # Update the session state data list with the new briefing content
             st.session_state.vocab_data[word_index].update(briefing_content_to_save)
@@ -992,7 +993,7 @@ def two_minute_drill_ui():
         if briefing['audio_base64']:
             audio_data_url = f"data:audio/mp3;base64,{briefing['audio_base64']}"
             audio_html = f"""
-                <audio controls style="width: 100%; margin-bottom: 15px;" src="{audio_data_url}">
+                <audio controls style="width: 100%;" src="{audio_data_url}">
                     Your browser does not support the audio element.
                 </audio>
             """
@@ -1125,7 +1126,6 @@ def main():
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
         # 1. DATA LOAD: Load data quickly on every run
-        # 🛑 THIS IS THE BLOCKING STEP
         if not st.session_state.vocab_data:
             load_and_update_vocabulary_data() 
         

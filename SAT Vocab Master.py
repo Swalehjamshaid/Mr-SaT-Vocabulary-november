@@ -95,7 +95,8 @@ AUTO_EXTRACT_TARGET_SIZE = REQUIRED_WORD_COUNT
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25 
-BRIEFING_BATCH_SIZE = 5
+# 🟢 FINAL FIX: Increased Batch Size for faster throughput
+BRIEFING_BATCH_SIZE = 10 
 
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
@@ -393,7 +394,7 @@ def handle_bulk_audio_fix():
                     fixed_count += 1
                 else:
                     st.warning(f"Audio fixed for {word}, but save to Firebase failed.")
-            time.sleep(0.1) # Prevents hitting API limits too fast
+            # 🛑 REMOVED time.sleep(0.1)
     
     
     if fixed_count > 0:
@@ -472,8 +473,7 @@ def auto_generate_briefings():
         if briefing:
             generated_count += 1
         
-        # Add a small delay to respect API limits
-        time.sleep(1)
+        # 🛑 REMOVED time.sleep(1) to maximize speed
         
     # Check if there are more words remaining in the list AFTER this batch.
     remaining_words_count = len(words_to_brief_indices) - generated_count
@@ -525,7 +525,7 @@ def auto_generate_briefings_manual():
             if briefing:
                 generated_count += 1
             
-            time.sleep(1) # Add delay to respect API limits
+            # 🛑 REMOVED time.sleep(1) to maximize speed
             
     st.session_state.autotask_message = f"Manual Briefing complete: Generated {generated_count} briefings."
     
@@ -642,7 +642,7 @@ def next_drill_word():
         st.rerun()
 
 def prev_drill_word():
-    """Decrements the drill word index."""
+    """Decrements the displayed word page index."""
     if st.session_state.drill_word_index > 0:
         st.session_state.drill_word_index -= 1
         st.session_state.briefing_content_cache = {} # Clear cache

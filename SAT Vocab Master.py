@@ -60,7 +60,7 @@ try:
     
     if 'private_key' in service_account_info:
         raw_key = service_account_info['private_key']
-        # Normalize private key format (common issue with environment variables)
+        # Normalize private key format 
         cleaned_key = raw_key.strip()
         cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
         cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
@@ -95,7 +95,7 @@ ADMIN_EMAIL = "roy.jamshaid@gmail.com"
 ADMIN_PASSWORD = "Jamshaid,1981" 
 MANUAL_EXTRACT_BATCH = 50 
 
-# Pydantic Schema for Vocabulary Word
+# Pydantic Schema for Vocabulary Word (Ensures data structure)
 class SatWord(BaseModel):
     """Pydantic model for a vocabulary word, defining required structure."""
     word: str = Field(description="The SAT-level word.")
@@ -137,7 +137,6 @@ def get_all_vocabulary(cache_key: int) -> List[Dict]:
     """Fetches all vocabulary data from Firestore, optimized by Streamlit caching."""
     print(f"--- FETCHING DATA: Cache Key {cache_key} changed/not found. Running Firestore query. ---")
     try:
-        # Fetch data ordered by creation time to ensure consistent display and pagination
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
         vocab_list = [doc.to_dict() for doc in docs]
         return vocab_list
@@ -156,7 +155,6 @@ def increment_data_refresh_key():
 def save_word_to_firestore(word_data: Dict) -> bool:
     """Adds a single word document to the Firestore collection."""
     try:
-        # Use word (lowercase) as the unique document ID
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
         doc_ref.set(word_data, merge=False)
         increment_data_refresh_key()
@@ -199,13 +197,11 @@ def generate_tts_audio(text: str) -> Optional[str]:
 
 def generate_full_briefing(word_data: Dict) -> Optional[Dict]:
     """
-    STEP 2 of 2: Generates the detailed briefing text (LLM) and its audio (gTTS).
-    Returns a dictionary of briefing fields or None on failure.
+    Generates the detailed briefing text (LLM) and its audio (gTTS).
     """
     word = word_data.get('word', 'a high-level word')
     definition = word_data.get('definition', 'a complex meaning')
     
-    # Prompt is designed for a concise 60-80 word briefing
     prompt = f"""
     You are a vocabulary tutor. Write a **short, memorable, and concise briefing (5-6 sentences maximum, about 60-80 words)** on the word '{word}'. 
     
@@ -245,8 +241,8 @@ def generate_full_briefing(word_data: Dict) -> Optional[Dict]:
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
-    STEP 1 of 2: Calls Gemini to generate structured vocabulary (Word, Def, Tip, Usage) 
-    and then synchronously generates all audio and briefing content.
+    Calls Gemini to generate structured vocabulary and then synchronously
+    generates all required audio and briefing content.
     """
     
     prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
@@ -255,7 +251,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
     
     try:
-        # Get Base Word Data (Structured JSON via Pydantic schema)
+        # Get Base Word Data (Structured JSON)
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash", contents=prompt, config=config
         )
@@ -369,8 +365,8 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
 def auto_generate_briefings():
     """
     AUTO-TASK: Admin background task to process LEGACY words missing the 2-minute briefing.
+    This runs in batches on consecutive reruns.
     """
-    # Guard clauses to prevent running if not admin, already done, or already processing
     if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
 
@@ -398,7 +394,6 @@ def auto_generate_briefings():
         briefing_content = generate_full_briefing(word_data)
 
         if briefing_content:
-            # Update Firestore and Session State
             if update_word_in_firestore(word_data, briefing_content):
                 st.session_state.vocab_data[index].update(briefing_content)
                 generated_count += 1
@@ -430,7 +425,7 @@ def auto_generate_briefings_manual(batch_size: int):
 
     batch_indices = words_to_brief_indices[:batch_size]
     
-    st.session_state.autotask_message = f"Status: Manually starting bulk generation for {len(batch_indices)} missing briefings (Batch Size {batch_size})..."
+    st.session_state.autotask_message = f"Status: Manually starting bulk generation for {len(batch_indices)} missing briefings (Batch Size {batch_size})...."
     
     generated_count = 0
     
@@ -475,6 +470,7 @@ def handle_fix_single_audio(word_index: int):
         st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
     
     st.rerun()
+    return
 
 def handle_bulk_audio_fix():
     """Attempts to generate and save missing pronunciation audio for all corrupted words."""
@@ -513,15 +509,14 @@ def handle_bulk_audio_fix():
         
     status_placeholder.empty()
     st.rerun()
+    return
 
 def load_and_update_vocabulary_data():
     """
     Loads data into session state using the cached function.
-    Runs on every relevant rerun, but only queries Firestore if the cache key is incremented.
     """
     if not st.session_state.is_auth: return
     
-    # 🛑 Load data using the cached function 
     vocab_list = load_vocabulary_from_firestore()
     st.session_state.vocab_data = vocab_list
     st.session_state.initial_load_done = True

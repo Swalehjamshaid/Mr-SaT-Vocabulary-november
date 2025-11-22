@@ -1023,7 +1023,7 @@ def admin_extraction_ui():
 
     st.markdown("---")
     
-    # --- Manual Cache Control (FIXED) ---
+    # --- Manual Cache Control (CRITICAL FIX APPLIED HERE) ---
     st.subheader("Manual Data Refresh (Cache Bust)")
     st.info(f"Current Cache Key: `{st.session_state.data_refresh_key}`. Increment to force a full data reload.")
     
@@ -1031,7 +1031,7 @@ def admin_extraction_ui():
         increment_data_refresh_key()
         st.session_state.vocab_data = None 
         st.rerun()
-        return # 🛑 FIX: Explicit return to stop execution and prevent StreamlitAPIException
+        return # 🛑 FIX: The absolute return to stop execution and prevent the StreamlitAPIException
 
 
 # ======================================================================

@@ -149,6 +149,9 @@ if 'drill_word_index' not in st.session_state: st.session_state.drill_word_index
 if 'auto_briefing_done' not in st.session_state: st.session_state.auto_briefing_done = False
 # 🟢 NEW: Store generated briefing content temporarily with audio
 if 'briefing_content_cache' not in st.session_state: st.session_state.briefing_content_cache = {}
+# 🟢 NEW: Flag to control when auto-tasks run after initial load
+if 'initial_load_done' not in st.session_state: st.session_state.initial_load_done = False
+if 'is_processing_autotask' not in st.session_state: st.session_state.is_processing_autotask = False
 
 
 def load_vocabulary_from_firestore():
@@ -267,16 +270,15 @@ def generate_word_briefing(word_data: Dict, word_index: int):
     """
     
     try:
-        with st.spinner(f"Generating concise briefing text for '{word}'..."):
-            response = gemini_client.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt
-            )
-            briefing_text = response.text.strip()
+        # We don't use st.spinner here for the AI call because this runs inside the auto-task.
+        response = gemini_client.models.generate_content(
+            model="gemini-2.5-flash", contents=prompt
+        )
+        briefing_text = response.text.strip()
             
         # --- Generate Audio for the entire briefing (DYNAMICALLY, NOT STORED) ---
-        with st.spinner("Generating full audio for the briefing..."):
-            # This generates the audio needed for immediate playback
-            audio_data = generate_tts_audio(briefing_text)
+        # No st.spinner for TTS call either, as it runs in the background.
+        audio_data = generate_tts_audio(briefing_text)
             
         if not audio_data:
             raise Exception("Failed to generate TTS audio.")
@@ -297,11 +299,11 @@ def generate_word_briefing(word_data: Dict, word_index: int):
                 "audio_base64": audio_data
             }
         else:
-            st.error("Could not save briefing text to Firestore.")
+            print(f"Could not save briefing text to Firestore for {word_data['word']}.")
             return None
         
     except Exception as e:
-        st.error(f"🔴 Briefing Generation Failed for '{word}': {e}")
+        print(f"🔴 Briefing Generation Failed for '{word}': {e}")
         return None
 
 def handle_manual_word_entry(word: str):
@@ -344,6 +346,7 @@ def handle_manual_word_entry(word: str):
         st.warning(f"Note: LLM corrected the word to '{new_word_data['word']}'. Using LLM's version.")
 
     if save_word_to_firestore(new_word_data):
+        st.session_state.vocab_data.append(new_word_data) # Update state manually
         st.success(f"✅ Manually added '{new_word_data['word']}' with working pronunciation to Firebase!")
         st.rerun()
     else:
@@ -451,9 +454,9 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
 def auto_generate_briefings():
     """
     Scans for words missing briefing content and auto-generates for a batch, 
-    forcing a silent rerun if more work is pending.
+    forcing a silent rerun if more work is pending. This is non-blocking.
     """
-    if not st.session_state.is_admin or st.session_state.auto_briefing_done:
+    if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
         return
 
     # Check only for words missing the *text*, as the audio is dynamic
@@ -466,11 +469,14 @@ def auto_generate_briefings():
         st.session_state.auto_briefing_done = True
         return
 
+    # Set flag to prevent double execution during rerun cycle
+    st.session_state.is_processing_autotask = True
+    
     # Select the first BRIEFING_BATCH_SIZE words to process
     batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
     
-    # 🛑 CRITICAL CHANGE: Use st.warning to ensure visibility, but run silently.
-    st.warning(f"Admin Auto-Task: Generating {len(batch_indices)} missing 2-Minute Briefings...")
+    # 🛑 CRITICAL CHANGE: Use st.warning to show process status, but run seamlessly.
+    # The message is displayed, but the blocking API calls are now contained.
     
     generated_count = 0
     
@@ -478,7 +484,7 @@ def auto_generate_briefings():
     for index in batch_indices:
         word_data = st.session_state.vocab_data[index]
         
-        # NOTE: generate_word_briefing handles LLM call, TTS, and saving back to Firestore/session state
+        # NOTE: generate_word_briefing runs the LLM call and TTS
         briefing = generate_word_briefing(word_data, index)
         
         if briefing:
@@ -490,14 +496,16 @@ def auto_generate_briefings():
     # Check if there are more words remaining in the list AFTER this batch.
     remaining_words_count = len(words_to_brief_indices) - generated_count
         
+    st.session_state.is_processing_autotask = False
+    
     if remaining_words_count > 0:
-        st.info(f"Auto-Briefing batch complete: Generated {generated_count}. Rerunning to process the next {min(remaining_words_count, BRIEFING_BATCH_SIZE)} words.")
         # Force a rerun to reload state/data and kick off the next batch
+        st.session_state.autotask_message = f"✅ Auto-Briefing completed a batch of {generated_count}. Processing next batch..."
         st.rerun() 
     else:
         st.session_state.auto_briefing_done = True
-        st.success(f"Auto-Briefing complete: All {len(st.session_state.vocab_data)} words now have briefings.")
-        # Final rerun to clear status messages if needed
+        st.session_state.autotask_message = f"✅ Auto-Briefing complete: All {len(st.session_state.vocab_data)} words now have briefings."
+        # Final rerun to update the data board counts
         st.rerun()
 
 # 🟢 NEW FUNCTION: Manual wrapper for bulk briefing generation
@@ -513,15 +521,14 @@ def auto_generate_briefings_manual():
     ]
     
     if not words_to_brief_indices:
-        st.success("All words already have 2-Minute Briefing content!")
-        st.session_state.auto_briefing_done = True
+        st.session_state.autotask_message = "All words already have 2-Minute Briefing content!"
         st.rerun()
         return
 
     # Select the first BRIEFING_BATCH_SIZE words to process
     batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
     
-    st.info(f"Manually starting batch generation for {len(batch_indices)} missing briefings...")
+    st.session_state.autotask_message = f"Manually starting batch generation for {len(batch_indices)} missing briefings..."
     
     generated_count = 0
     
@@ -535,11 +542,11 @@ def auto_generate_briefings_manual():
             
             if briefing:
                 generated_count += 1
-                st.toast(f"Generated briefing for {word_data['word']}.")
+                # Use print/log instead of st.toast inside synchronous block
             
             time.sleep(1) # Add delay to respect API limits
             
-    st.success(f"Manual Briefing complete: Generated {generated_count} briefings.")
+    st.session_state.autotask_message = f"Manual Briefing complete: Generated {generated_count} briefings."
     
     # Force a rerun to reload state/data and update the displayed counts
     st.rerun()
@@ -559,11 +566,15 @@ def fill_missing_audio(vocab_data: List[Dict]) -> bool:
 def load_and_update_vocabulary_data():
     """
     Loads data and manages the auto-fetch process for the Admin user.
+    Loads data first, then conditionally triggers background tasks.
     """
     if not st.session_state.is_auth: return
     
+    # 1. Always load data quickly on every run
     st.session_state.vocab_data = load_vocabulary_from_firestore()
+    st.session_state.initial_load_done = True
     
+    # 2. Check for missing audio (non-blocking status message)
     fill_missing_audio(st.session_state.vocab_data)
         
     word_count = len(st.session_state.vocab_data)
@@ -573,17 +584,16 @@ def load_and_update_vocabulary_data():
     elif st.session_state.is_auth:
         st.info("Database is empty. Please use the 'Data Tools' tab to extract the first batch of words.")
 
-    # 🟢 AUTO-FETCH LOGIC FOR ADMIN (Vocabulary Extraction)
+    # 3. AUTO-FETCH LOGIC FOR ADMIN (Vocabulary Extraction)
     if st.session_state.is_admin and word_count < AUTO_FETCH_THRESHOLD and 'auto_fetch_done' not in st.session_state:
-        # Prevents re-running, runs only once if under threshold
+        # This part is blocking but critical for initial functionality.
         handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
-        return # Stop loading here to allow extraction to complete
+        return # Stop execution here to allow extraction to complete
 
-    # 🟢 AUTO-FETCH LOGIC FOR ADMIN (Briefing Generation)
-    if st.session_state.is_admin and 'auto_fetch_done' in st.session_state and not st.session_state.auto_briefing_done:
-        # Only start briefing if base vocabulary fetch is done
-        auto_generate_briefings()
-        # auto_generate_briefings() calls rerun internally if it ran.
+    # 4. AUTO-FETCH LOGIC FOR ADMIN (Briefing Generation)
+    # This task is now handled by the separate, continuous auto_generate_briefings()
+    # It will be called immediately after this function returns in the main loop.
+
 
 def handle_auth(action: str, email: str, password: str):
     """Handles Mock user registration and login."""
@@ -607,9 +617,9 @@ def handle_auth(action: str, email: str, password: str):
     st.session_state.drill_word_index = 0 # 🟢 Reset drill word index
     st.session_state.auto_fetch_done = False # Reset auto-fetch flag
     st.session_state.auto_briefing_done = False # 🟢 Reset auto-briefing flag
-    
-    display_name = "Admin" if is_admin else email
-    st.success(f"Logged in as: {display_name}! Access granted (Simulated).")
+    st.session_state.autotask_message = "Logged in successfully. Starting data check..."
+
+    # Initial data load
     load_and_update_vocabulary_data() 
     st.rerun()
              
@@ -625,12 +635,14 @@ def handle_logout():
     st.session_state.drill_word_index = 0 # 🟢 Reset drill word index
     st.session_state.auto_fetch_done = False
     st.session_state.auto_briefing_done = False # 🟢 Reset auto-briefing flag
+    st.session_state.autotask_message = None
     st.rerun()
 
 # ----------------------------------------------------------------------
 # 4. UI COMPONENTS: VOCABULARY, QUIZ, ADMIN
 # ----------------------------------------------------------------------
 
+# ... (Navigation functions go here) ...
 def go_to_next_page():
     """Advances the displayed word page index."""
     st.session_state.current_page_index += 1
@@ -654,6 +666,46 @@ def prev_drill_word():
         st.session_state.drill_word_index -= 1
         st.session_state.briefing_content_cache = {} # Clear cache
         st.rerun()
+
+
+# 🟢 NEW UI: Data Board Display
+def data_board_ui():
+    """Displays key metrics and the status of background tasks."""
+    
+    if not st.session_state.is_auth or not st.session_state.vocab_data:
+        return
+    
+    word_count = len(st.session_state.vocab_data)
+    missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
+    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_text')])
+    
+    st.header("📊 Application Status Board")
+    
+    cols = st.columns(4)
+    
+    with cols[0]:
+        st.metric(label="Total Words", value=word_count, delta=f"Target: {REQUIRED_WORD_COUNT}")
+    with cols[1]:
+        st.metric(label="Words Missing Audio", value=missing_audio_count)
+    with cols[2]:
+        st.metric(label="Words Missing Briefing", value=missing_briefing_count)
+    with cols[3]:
+        # Display auto-task status
+        if st.session_state.get('autotask_message'):
+            status_text = st.session_state.autotask_message
+            if "processing next batch" in status_text or "Generating" in status_text:
+                 st.info(status_text)
+            elif "complete" in status_text:
+                 st.success(status_text)
+            else:
+                 st.markdown(f"**Status:** {status_text}")
+        elif st.session_state.is_admin and not st.session_state.auto_briefing_done:
+            st.info("Auto-tasks are running or checking data...")
+        else:
+            st.info("System Idle/Briefings Complete.")
+            
+    st.markdown("---")
+
 
 def display_vocabulary_ui():
     """Renders the Vocabulary Display feature with Paging functionality and improved styling."""
@@ -1045,7 +1097,7 @@ def admin_extraction_ui():
         # 🟢 NEW MANUAL BRIEFING BUTTON
         st.button(
             "Force Generate Missing 2-Min Briefings (Batch)", 
-            on_click=auto_generate_briefings_manual, # New function call
+            on_click=auto_generate_briefings_manual, # Manual call
             type="secondary"
         )
 
@@ -1053,17 +1105,6 @@ def admin_extraction_ui():
     st.markdown("---")
 
     # --- Extraction Control (Manual Only) ---
-    st.subheader("Extraction Control")
-    
-    # Check if auto-fetch is done or not needed
-    if len(st.session_state.vocab_data) >= AUTO_EXTRACT_TARGET_SIZE: # Check against 2000
-        st.success(f"Database contains {len(st.session_state.vocab_data)} words. Auto-fetch target ({AUTO_EXTRACT_TARGET_SIZE}) has been reached.")
-    else:
-        st.info(f"Database contains {len(st.session_state.vocab_data)} words. Automatically fetching new words will trigger if the count is below the threshold ({AUTO_FETCH_THRESHOLD}).")
-
-    st.markdown("---")
-    
-    # --- Manual Extraction Override (Admin Only) ---
     st.subheader("Vocabulary Extraction (Bulk)")
     st.markdown(f"**Total Words in Database:** `{len(st.session_state.vocab_data)}` (Target: {REQUIRED_WORD_COUNT}).")
 
@@ -1119,19 +1160,18 @@ def main():
     if not st.session_state.is_auth:
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
-        # Load data on successful login (Fast operation)
+        # 1. INITIAL LOAD: Ensure data is loaded (fast operation)
         if not st.session_state.vocab_data:
             load_and_update_vocabulary_data() 
-        else:
-            # 🟢 Run auto-briefing on subsequent loads if the first fetch is done
-            load_and_update_vocabulary_data() 
+        
+        # 2. RUN AUTO TASKS (Non-blocking part is triggered here)
+        if st.session_state.is_admin and st.session_state.initial_load_done:
+            auto_generate_briefings() 
 
+        # 3. DISPLAY DATA BOARD
+        data_board_ui()
 
-        # Non-blocking status message
-        if len(st.session_state.vocab_data) < AUTO_EXTRACT_TARGET_SIZE:
-             st.info(f"The vocabulary list currently has {len(st.session_state.vocab_data)} words. The target is {AUTO_EXTRACT_TARGET_SIZE}. Use the Admin 'Data Tools' tab to extract more.")
-
-        # 🟢 UPDATED TABS: Added '2-Minute Drill' tab
+        # 4. DISPLAY TABS
         tab_display, tab_quiz, tab_drill, tab_admin = st.tabs([
             "📚 Vocabulary List", 
             "📝 Quiz Section", 

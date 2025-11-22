@@ -450,8 +450,8 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
 
 def auto_generate_briefings():
     """
-    Scans for words missing briefing content and auto-generates for a batch.
-    This is designed to be called by the Admin user on app load.
+    Scans for words missing briefing content and auto-generates for a batch, 
+    forcing a silent rerun if more work is pending.
     """
     if not st.session_state.is_admin or st.session_state.auto_briefing_done:
         return
@@ -469,6 +469,7 @@ def auto_generate_briefings():
     # Select the first BRIEFING_BATCH_SIZE words to process
     batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
     
+    # 🛑 CRITICAL CHANGE: Use st.warning to ensure visibility, but run silently.
     st.warning(f"Admin Auto-Task: Generating {len(batch_indices)} missing 2-Minute Briefings...")
     
     generated_count = 0
@@ -486,14 +487,18 @@ def auto_generate_briefings():
         # Add a small delay to respect API limits
         time.sleep(1)
         
-    st.info(f"Auto-Briefing complete: Generated {generated_count} briefings. Refresh the app to continue the auto-task.")
-    
-    # Set the flag to true only if the list is empty (or we stop auto-running)
-    if generated_count == 0 or len(words_to_brief_indices) <= BRIEFING_BATCH_SIZE:
-        st.session_state.auto_briefing_done = True
+    # Check if there are more words remaining in the list AFTER this batch.
+    remaining_words_count = len(words_to_brief_indices) - generated_count
         
-    # Force a rerun to reload state/data and potentially kick off the next batch
-    st.rerun()
+    if remaining_words_count > 0:
+        st.info(f"Auto-Briefing batch complete: Generated {generated_count}. Rerunning to process the next {min(remaining_words_count, BRIEFING_BATCH_SIZE)} words.")
+        # Force a rerun to reload state/data and kick off the next batch
+        st.rerun() 
+    else:
+        st.session_state.auto_briefing_done = True
+        st.success(f"Auto-Briefing complete: All {len(st.session_state.vocab_data)} words now have briefings.")
+        # Final rerun to clear status messages if needed
+        st.rerun()
 
 # 🟢 NEW FUNCTION: Manual wrapper for bulk briefing generation
 def auto_generate_briefings_manual():

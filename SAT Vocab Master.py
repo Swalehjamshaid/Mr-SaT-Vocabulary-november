@@ -154,6 +154,7 @@ if 'autotask_message' not in st.session_state: st.session_state.autotask_message
 def load_vocabulary_from_firestore():
     """Loads all vocabulary data from Firestore."""
     try:
+        # 🛑 THIS IS THE SLOW STEP: Synchronously loads all data.
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
         vocab_list = [doc.to_dict() for doc in docs]
         return vocab_list
@@ -165,7 +166,6 @@ def save_word_to_firestore(word_data: Dict):
     """Adds a single word document to the Firestore collection."""
     try:
         doc_ref = VOCAB_COLLECTION.document(word_data['word'].lower())
-        # All fields are now saved, including audio base64 data
         doc_ref.set(word_data, merge=False)
         return True
     except Exception as e:
@@ -265,13 +265,13 @@ def generate_word_briefing(word_data: Dict, word_index: int):
     """
     
     try:
-        # 1. Generate Briefing Text
+        # 1. Generate Briefing Text (Source: Gemini API)
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash", contents=prompt
         )
         briefing_text = response.text.strip()
             
-        # 2. Generate Briefing Audio (Blocking Operation)
+        # 2. Generate Briefing Audio (Source: gTTS)
         audio_data = generate_tts_audio(briefing_text)
             
         if not audio_data:
@@ -1125,6 +1125,7 @@ def main():
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
         # 1. DATA LOAD: Load data quickly on every run
+        # 🛑 THIS IS THE BLOCKING STEP
         if not st.session_state.vocab_data:
             load_and_update_vocabulary_data() 
         

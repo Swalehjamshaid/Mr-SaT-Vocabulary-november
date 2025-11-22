@@ -13,21 +13,21 @@ try:
     from firebase_admin import credentials, initialize_app, firestore
     import firebase_admin
 except ImportError:
-    st.error("FIREBASE ERROR: The required library 'firebase-admin' is likely missing. Please install it.")
+    st.error("FIREBASE ERROR: The required library 'firebase-admin' is likely missing.")
     st.stop()
 
 try:
     from gtts import gTTS
     import io
 except ImportError:
-    st.error("ERROR: The 'gtts' library is required for open-source TTS. Please install it.")
+    st.error("ERROR: The 'gtts' library is required for open-source TTS.")
     st.stop()
     
 try:
     from google import genai
     from google.genai import types
 except ImportError:
-    st.error("ERROR: The 'google-genai' and 'pydantic' libraries are required. Please install them.")
+    st.error("ERROR: The 'google-genai' and 'pydantic' libraries are required.")
     st.stop()
 
 
@@ -42,6 +42,7 @@ if "GEMINI_API_KEY" not in os.environ:
 
 # Initialize Gemini Client
 try:
+    # API key is automatically picked up from the environment
     gemini_client = genai.Client()
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
@@ -52,7 +53,7 @@ try:
     secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
     cleaned_value = secret_value.strip().strip("'").strip('"')
     
-    # Normalize potential triple quotes from Streamlit Secrets formatting
+    # Check and clean potential triple quotes from Streamlit Secrets formatting
     if cleaned_value.startswith('"""') and cleaned_value.endswith('"""'):
         cleaned_value = cleaned_value[3:-3].strip()
 
@@ -60,7 +61,7 @@ try:
     
     if 'private_key' in service_account_info:
         raw_key = service_account_info['private_key']
-        # Normalize private key format 
+        # Normalize private key format (common issue with environment variables)
         cleaned_key = raw_key.strip()
         cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
         cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
@@ -95,7 +96,7 @@ ADMIN_EMAIL = "roy.jamshaid@gmail.com"
 ADMIN_PASSWORD = "Jamshaid,1981" 
 MANUAL_EXTRACT_BATCH = 50 
 
-# Pydantic Schema for Vocabulary Word (Ensures data structure)
+# Pydantic Schema for Vocabulary Word
 class SatWord(BaseModel):
     """Pydantic model for a vocabulary word, defining required structure."""
     word: str = Field(description="The SAT-level word.")
@@ -135,6 +136,7 @@ if 'data_refresh_key' not in st.session_state: st.session_state.data_refresh_key
 @st.cache_data(show_spinner=False)
 def get_all_vocabulary(cache_key: int) -> List[Dict]:
     """Fetches all vocabulary data from Firestore, optimized by Streamlit caching."""
+    # The function runs only if the cache_key changes.
     print(f"--- FETCHING DATA: Cache Key {cache_key} changed/not found. Running Firestore query. ---")
     try:
         docs = VOCAB_COLLECTION.order_by('created_at').stream()
@@ -176,7 +178,7 @@ def update_word_in_firestore(word_data: Dict, fields_to_update: Dict) -> bool:
 
 
 # ======================================================================
-# 3. AI EXTRACTION & AUDIO FUNCTIONS (SYNCHRONOUS FETCH LOGIC)
+# 3. AI EXTRACTION & AUDIO FUNCTIONS (FIXED CONTINUOUS FETCH)
 # ======================================================================
 
 def generate_tts_audio(text: str) -> Optional[str]:
@@ -197,11 +199,13 @@ def generate_tts_audio(text: str) -> Optional[str]:
 
 def generate_full_briefing(word_data: Dict) -> Optional[Dict]:
     """
-    Generates the detailed briefing text (LLM) and its audio (gTTS).
+    Generates the detailed briefing text and its corresponding Base64 audio.
+    Returns a dictionary of briefing fields or None on failure.
     """
     word = word_data.get('word', 'a high-level word')
     definition = word_data.get('definition', 'a complex meaning')
     
+    # Prompt is designed for a concise 60-80 word briefing
     prompt = f"""
     You are a vocabulary tutor. Write a **short, memorable, and concise briefing (5-6 sentences maximum, about 60-80 words)** on the word '{word}'. 
     
@@ -241,8 +245,9 @@ def generate_full_briefing(word_data: Dict) -> Optional[Dict]:
 
 def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) -> List[Dict]:
     """
-    Calls Gemini to generate structured vocabulary and then synchronously
-    generates all required audio and briefing content.
+    Calls Gemini to generate base structured vocabulary and then synchronously
+    generates word pronunciation and the FULL 2-Minute briefing and audio.
+    This ensures all required data is fetched before saving.
     """
     
     prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
@@ -251,7 +256,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
     config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
     
     try:
-        # Get Base Word Data (Structured JSON)
+        # 1. Get Base Word Data (Word, Definition, Tip, Usage)
         response = gemini_client.models.generate_content(
             model="gemini-2.5-flash", contents=prompt, config=config
         )
@@ -263,7 +268,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
         
     final_words = []
     
-    # Generate Audio and Briefing synchronously for each validated word
+    # 2. Add Pronunciation & 2-Minute Briefing (CRITICAL STEP)
     with st.spinner(f"Generating Pronunciation, Briefings, and saving {len(validated_words)} words... This is a slow, multi-step process."):
         for word_data in validated_words:
             
@@ -277,7 +282,7 @@ def real_llm_vocabulary_extraction(num_words: int, existing_words: List[str]) ->
             if briefing_content:
                 word_data.update(briefing_content)
             else:
-                # If briefing fails, save the word but flag it for future auto-fix
+                # Still save the base word, but briefing is missing
                 print(f"Warning: Briefing generation failed for {word_data['word']}. It will be tagged for legacy fix.")
             
             final_words.append(word_data)
@@ -335,116 +340,6 @@ def handle_manual_word_entry(word: str):
     else:
         st.error("🔴 Failed to save to Firebase.")
 
-def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
-    """Handles the bulk word extraction (manual or auto-triggered)."""
-    
-    status_message = f"Automatically extracting {num_words} new words (Admin Only)..." if auto_fetch else f"Manually extracting {num_words} new words..."
-
-    st.info(status_message)
-    
-    existing_words = [d['word'] for d in st.session_state.vocab_data if st.session_state.vocab_data]
-    
-    # 🛑 SLOW STEP: AI extraction and ALL content generation runs here
-    new_batch = real_llm_vocabulary_extraction(num_words, existing_words) 
-    
-    if new_batch:
-        successful_saves = 0
-        for word_data in new_batch:
-            if save_word_to_firestore(word_data):
-                st.session_state.vocab_data.append(word_data)
-                successful_saves += 1
-                
-        if not auto_fetch:
-            st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
-        st.session_state.auto_fetch_done = True
-        st.rerun() 
-    else:
-        if not auto_fetch:
-            st.error("🔴 Failed to generate new words. Check API key and logs.")
-
-def auto_generate_briefings():
-    """
-    AUTO-TASK: Admin background task to process LEGACY words missing the 2-minute briefing.
-    This runs in batches on consecutive reruns.
-    """
-    if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
-        return
-
-    # Check for words missing the permanent briefing audio
-    words_to_brief_indices = [
-        i for i, d in enumerate(st.session_state.vocab_data) 
-        if not d.get('briefing_audio_base64') 
-    ]
-    
-    if not words_to_brief_indices:
-        st.session_state.auto_briefing_done = True
-        return
-
-    st.session_state.is_processing_autotask = True
-    batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
-    
-    st.session_state.autotask_message = f"Admin Auto-Task: Generating {len(batch_indices)} LEGACY missing Briefings..."
-    
-    generated_count = 0
-    
-    # Process the batch
-    for index in batch_indices:
-        word_data = st.session_state.vocab_data[index]
-        
-        briefing_content = generate_full_briefing(word_data)
-
-        if briefing_content:
-            if update_word_in_firestore(word_data, briefing_content):
-                st.session_state.vocab_data[index].update(briefing_content)
-                generated_count += 1
-            
-    remaining_words_count = len(words_to_brief_indices) - generated_count
-        
-    st.session_state.is_processing_autotask = False
-    
-    if remaining_words_count > 0:
-        st.session_state.autotask_message = f"✅ Auto-Briefing completed a batch of {generated_count}. {remaining_words_count} remaining. Processing next LEGACY batch..."
-        st.rerun() 
-    else:
-        st.session_state.auto_briefing_done = True
-        st.session_state.autotask_message = f"✅ Auto-Briefing complete: All {len(st.session_state.vocab_data)} words now have briefings."
-        st.rerun()
-
-def auto_generate_briefings_manual(batch_size: int):
-    """Manually triggers a large batch generation of missing briefing content."""
-    
-    words_to_brief_indices = [
-        i for i, d in enumerate(st.session_state.vocab_data)  
-        if not d.get('briefing_audio_base64') 
-    ]
-    
-    if not words_to_brief_indices:
-        st.session_state.autotask_message = "All words already have 2-Minute Briefing content!"
-        st.rerun()
-        return
-
-    batch_indices = words_to_brief_indices[:batch_size]
-    
-    st.session_state.autotask_message = f"Status: Manually starting bulk generation for {len(batch_indices)} missing briefings (Batch Size {batch_size})...."
-    
-    generated_count = 0
-    
-    with st.spinner(f"Generating briefing text and audio for {len(batch_indices)} words..."):
-        for index in batch_indices:
-            word_data = st.session_state.vocab_data[index]
-            
-            briefing_content = generate_full_briefing(word_data)
-            
-            if briefing_content:
-                if update_word_in_firestore(word_data, briefing_content):
-                    st.session_state.vocab_data[index].update(briefing_content)
-                    generated_count += 1
-            
-    st.session_state.autotask_message = f"Manual Bulk Briefing complete: Generated {generated_count} briefings. Please wait for the page to refresh to see the updated count."
-    
-    st.rerun()
-    return
-
 def handle_fix_single_audio(word_index: int):
     """Generates missing pronunciation audio for a single word and updates the Firestore document."""
     
@@ -470,7 +365,6 @@ def handle_fix_single_audio(word_index: int):
         st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
     
     st.rerun()
-    return
 
 def handle_bulk_audio_fix():
     """Attempts to generate and save missing pronunciation audio for all corrupted words."""
@@ -509,22 +403,150 @@ def handle_bulk_audio_fix():
         
     status_placeholder.empty()
     st.rerun()
-    return
+
+def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
+    """Handles the bulk word extraction (manual or auto-triggered)."""
+    
+    status_message = f"Automatically extracting {num_words} new words (Admin Only)..." if auto_fetch else f"Manually extracting {num_words} new words..."
+
+    st.info(status_message)
+    
+    existing_words = [d['word'] for d in st.session_state.vocab_data]
+    
+    # 🛑 SLOW STEP: AI extraction and ALL content generation runs here
+    new_batch = real_llm_vocabulary_extraction(num_words, existing_words) 
+    
+    if new_batch:
+        successful_saves = 0
+        for word_data in new_batch:
+            if save_word_to_firestore(word_data):
+                st.session_state.vocab_data.append(word_data)
+                successful_saves += 1
+                
+        if not auto_fetch:
+            st.success(f"✅ Added {successful_saves} words. Current total: {len(st.session_state.vocab_data)}.")
+        st.session_state.auto_fetch_done = True
+        st.rerun() 
+    else:
+        if not auto_fetch:
+            st.error("🔴 Failed to generate new words. Check API key and logs.")
+
+def auto_generate_briefings():
+    """
+    AUTO-FETCH: Admin background task to process LEGACY words missing the 2-minute briefing.
+    """
+    if not st.session_state.is_admin or st.session_state.auto_briefing_done or st.session_state.is_processing_autotask:
+        return
+
+    # Check for words missing the permanent briefing audio
+    words_to_brief_indices = [
+        i for i, d in enumerate(st.session_state.vocab_data) 
+        if not d.get('briefing_audio_base64') 
+    ]
+    
+    if not words_to_brief_indices:
+        st.session_state.auto_briefing_done = True
+        return
+
+    st.session_state.is_processing_autotask = True
+    batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
+    
+    st.session_state.autotask_message = f"Admin Auto-Task: Generating {len(batch_indices)} LEGACY missing Briefings..."
+    
+    generated_count = 0
+    
+    # Process the batch
+    for index in batch_indices:
+        word_data = st.session_state.vocab_data[index]
+        
+        # Use the combined briefing function
+        briefing_content = generate_full_briefing(word_data)
+
+        if briefing_content:
+            # Update Firestore and Session State
+            if update_word_in_firestore(word_data, briefing_content):
+                st.session_state.vocab_data[index].update(briefing_content)
+                generated_count += 1
+            
+    remaining_words_count = len(words_to_brief_indices) - generated_count
+        
+    st.session_state.is_processing_autotask = False
+    
+    if remaining_words_count > 0:
+        st.session_state.autotask_message = f"✅ Auto-Briefing completed a batch of {generated_count}. Processing next LEGACY batch..."
+        st.rerun() 
+    else:
+        st.session_state.auto_briefing_done = True
+        st.session_state.autotask_message = f"✅ Auto-Briefing complete: All {len(st.session_state.vocab_data)} words now have briefings."
+        st.rerun()
+
+def auto_generate_briefings_manual(batch_size: int):
+    """
+    Manually triggers a large batch generation of missing briefing content 
+    and forces a rerun to update the word counts in the Admin UI.
+    """
+    
+    words_to_brief_indices = [
+        i for i, d in enumerate(st.session_state.vocab_data)  
+        if not d.get('briefing_audio_base64') 
+    ]
+    
+    if not words_to_brief_indices:
+        st.session_state.autotask_message = "All words already have 2-Minute Briefing content!"
+        st.rerun()
+        return
+
+    # Select the first 'batch_size' words to process
+    batch_indices = words_to_brief_indices[:batch_size]
+    
+    st.session_state.autotask_message = f"Status: Manually starting bulk generation for {len(batch_indices)} missing briefings (Batch Size {batch_size})..."
+    
+    generated_count = 0
+    
+    # Process the batch
+    with st.spinner(f"Generating briefing text and audio for {len(batch_indices)} words..."):
+        for index in batch_indices:
+            word_data = st.session_state.vocab_data[index]
+            
+            # Use the combined briefing function
+            briefing_content = generate_full_briefing(word_data)
+            
+            if briefing_content:
+                # Update Firestore and Session State
+                if update_word_in_firestore(word_data, briefing_content):
+                    st.session_state.vocab_data[index].update(briefing_content)
+                    generated_count += 1
+            
+    st.session_state.autotask_message = f"Manual Bulk Briefing complete: Generated {generated_count} briefings. Please wait for the page to refresh to see the updated count."
+    
+    # Force a rerun to reload state/data and update the displayed counts
+    st.rerun()
+
+
+def fill_missing_audio(vocab_data: List[Dict]) -> bool:
+    """Checks for missing audio to display the correct warning/fix options."""
+    words_to_fix = [d for d in vocab_data if d.get('audio_base64') is None]
+    if not words_to_fix:
+        return False
+
+    st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. Use the 'Fix Audio' button next to each word or the 'Bulk Fix' tool.")
+    
+    return False 
 
 def load_and_update_vocabulary_data():
     """
     Loads data into session state using the cached function.
+    This runs on every relevant rerun, but only queries Firestore if the cache key is incremented.
     """
     if not st.session_state.is_auth: return
     
+    # 🛑 Load data using the cached function (will query Firestore if data_refresh_key changed)
     vocab_list = load_vocabulary_from_firestore()
     st.session_state.vocab_data = vocab_list
     st.session_state.initial_load_done = True
     
-    # Check for missing audio 
-    words_to_fix = [d for d in vocab_list if d.get('audio_base64') is None]
-    if words_to_fix:
-        st.warning(f"Audio Integrity Check: Found {len(words_to_fix)} words missing pronunciation. Use Admin tools to fix.")
+    # Check for missing audio (non-blocking status message)
+    fill_missing_audio(st.session_state.vocab_data)
         
     word_count = len(st.session_state.vocab_data)
     
@@ -533,7 +555,7 @@ def load_and_update_vocabulary_data():
     elif st.session_state.is_auth:
         st.info("Database is empty. Please use the 'Data Tools' tab to extract the first batch of words.")
 
-    # 3. AUTO-FETCH LOGIC FOR ADMIN (Initial Vocabulary Extraction)
+    # 3. AUTO-FETCH LOGIC FOR ADMIN (Vocabulary Extraction)
     if st.session_state.is_admin and word_count < AUTO_FETCH_THRESHOLD and 'auto_fetch_done' not in st.session_state:
         handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
         return 
@@ -556,7 +578,6 @@ def handle_auth(action: str, email: str, password: str):
     st.session_state.current_user_email = email
     st.session_state.is_auth = True
     st.session_state.is_admin = is_admin
-    # Reset view controls on login
     st.session_state.current_page_index = 0
     st.session_state.quiz_start_index = 0
     st.session_state.drill_word_index = 0 
@@ -564,10 +585,10 @@ def handle_auth(action: str, email: str, password: str):
     st.session_state.auto_briefing_done = False 
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
     
-    # CRITICAL: Increment key on login to guarantee a fresh data fetch
+    # CRITICAL FIX: Increment key on login to guarantee a fresh data fetch
     increment_data_refresh_key()
 
-    # SYNCHRONOUS LOAD WITH VISUAL SPINNER 
+    # 🛑 SYNCHRONOUS LOAD WITH VISUAL SPINNER 
     with st.spinner("Downloading all vocabulary records from Firestore... Please wait."):
         load_and_update_vocabulary_data() 
         
@@ -579,27 +600,37 @@ def handle_logout():
     st.session_state.current_user_email = None
     st.session_state.quiz_active = False
     st.session_state.is_admin = False
+    st.session_state.current_page_index = 0
+    st.session_state.quiz_start_index = 0
+    st.session_state.drill_word_index = 0 
+    st.session_state.auto_fetch_done = False
+    st.session_state.auto_briefing_done = False 
+    st.session_state.autotask_message = None
     st.session_state.data_refresh_key = 0
     st.rerun()
 
 # ======================================================================
-# 5. UI COMPONENTS: VOCABULARY, QUIZ, ADMIN
+# 4. UI COMPONENTS: VOCABULARY, QUIZ, ADMIN
 # ======================================================================
 
 def go_to_next_page():
+    """Advances the displayed word page index."""
     st.session_state.current_page_index += 1
     st.rerun()
 
 def go_to_prev_page():
+    """Decrements the displayed word page index."""
     st.session_state.current_page_index -= 1
     st.rerun()
     
 def next_drill_word():
+    """Advances the drill word index."""
     if st.session_state.drill_word_index < len(st.session_state.vocab_data):
         st.session_state.drill_word_index += 1
         st.rerun()
 
 def prev_drill_word():
+    """Decrements the displayed word page index."""
     if st.session_state.drill_word_index > 0:
         st.session_state.drill_word_index -= 1
         st.rerun()
@@ -628,7 +659,6 @@ def data_board_ui():
     with cols[3]:
         status_message = st.session_state.get('autotask_message', "System Idle/Complete.")
         
-        # Display status with appropriate color/icon
         if "processing next batch" in status_message or "Generating" in status_message:
              st.info(f"Status: {status_message}")
         elif "complete" in status_message or "Idle" in status_message:
@@ -640,7 +670,7 @@ def data_board_ui():
 
 
 def display_vocabulary_ui():
-    """Renders the Vocabulary Display feature with Paging functionality."""
+    """Renders the Vocabulary Display feature with Paging functionality and improved styling."""
     st.header("📚 Vocabulary Display", divider="blue")
     
     if st.session_state.vocab_data is None or not st.session_state.vocab_data:
@@ -652,20 +682,23 @@ def display_vocabulary_ui():
     start_index = st.session_state.current_page_index * LOAD_BATCH_SIZE
     end_index = min(start_index + LOAD_BATCH_SIZE, total_words)
     
+    words_to_show = end_index - start_index
+    
     st.markdown(f"**Showing Words {start_index + 1} - {end_index} of {total_words} High-Level SAT Words**")
     
     
     # --- WORD DISPLAY CONTAINER ---
     with st.container(border=True): 
         
+        # Display the words for the current page only
         for i, data in enumerate(st.session_state.vocab_data[start_index:end_index]):
             word_number = start_index + i + 1 
             word = data.get('word', 'N/A').upper()
             pronunciation = data.get('pronunciation', 'N/A')
-            definition = data.get('definition', 'N/A')
             tip = data.get('tip', 'N/A')
             usage = data.get('usage', 'N/A')
             audio_base64 = data.get('audio_base64') 
+            definition = data.get('definition', 'N/A')
             
             expander_title = f"**{word_number}. {word}** — {pronunciation}" 
             
@@ -681,8 +714,8 @@ def display_vocabulary_ui():
                     """
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
-                    st.warning("Audio not available for this word.")
-                    # Only show fix button to admin
+                    st.warning("Audio not available for this word. TTS generation may have failed.")
+                    
                     if st.session_state.is_admin:
                         st.button(
                             f"Fix Audio for #{word_number}", 
@@ -714,7 +747,7 @@ def display_vocabulary_ui():
 
 
 def start_new_quiz():
-    """Initializes the quiz."""
+    """Initializes the quiz based only on the currently displayed words in sequential order."""
     start = st.session_state.quiz_start_index
     end = start + QUIZ_SIZE
     
@@ -730,7 +763,7 @@ def start_new_quiz():
     for question_data in words_pool:
         correct_answer = question_data['definition'].capitalize()
         
-        # Select 3 unique decoys 
+        # Select 3 unique decoys that aren't the correct answer
         decoys = random.sample([
             d for d in all_definitions if d != correct_answer
         ], min(3, len([d for d in all_definitions if d != correct_answer])))
@@ -761,7 +794,7 @@ def generate_quiz_ui():
     """Renders the Quiz Section feature."""
     st.header("📝 Vocabulary Quiz", divider="green")
     
-    total_words = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
+    total_words = len(st.session_state.vocab_data)
     
     if total_words < QUIZ_SIZE:
         st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}")
@@ -882,7 +915,7 @@ def generate_quiz_ui():
             st.rerun()
 
 def two_minute_drill_ui():
-    """Renders the UI for the 2-Minute Word Briefing feature."""
+    """Renders the UI for the 2-Minute Word Briefing feature using sequential navigation."""
     st.header("⏱️ 2-Minute Drill", divider="red")
 
     if st.session_state.vocab_data is None or not st.session_state.vocab_data:
@@ -898,11 +931,11 @@ def two_minute_drill_ui():
         st.rerun()
         
     selected_word_data = st.session_state.vocab_data[current_index]
-    selected_word_str = selected_word_data.get('word', 'N/A').upper()
+    selected_word_str = selected_word_data['word'].upper()
     
     st.markdown(f"**Current Word:** **{current_index + 1}** of **{total_words}**")
 
-    # Fetch permanent audio and text from the database fields
+    # Fetch permanent audio from the database
     briefing_text = selected_word_data.get('briefing_text')
     briefing_audio_base64 = selected_word_data.get('briefing_audio_base64')
     
@@ -917,10 +950,11 @@ def two_minute_drill_ui():
         }
         st.success("Briefing content loaded from database.")
     
-    # If content is not in DB, allow manual generation (Only visible to Admin)
-    if not briefing_exists_in_db and st.session_state.is_admin:
+    # If content is not in DB, allow manual generation
+    if not briefing_exists_in_db:
         st.warning(f"Briefing content missing for {selected_word_str}. Generate it now!")
         if st.button(f"Generate and Save Briefing for {selected_word_str}", type="primary", key="manual_drill_gen"):
+            # Call the manual batch function with a size of 1 to process this single word immediately.
             auto_generate_briefings_manual(1) 
             st.rerun() 
     
@@ -933,6 +967,7 @@ def two_minute_drill_ui():
             audio_data_url = f"data:audio/mp3;base64,{briefing['audio_base64']}"
             audio_html = f"""
                 <audio controls style="width: 100%;" src="{audio_data_url}">
+                    
                         Your browser does not support the audio element.
                 </audio>
             """
@@ -944,9 +979,7 @@ def two_minute_drill_ui():
         st.markdown(briefing['text'])
         
         st.markdown("---")
-        st.info(f"The briefing is about {len(briefing['text'].split())} words long.")
-    elif not briefing_exists_in_db and not st.session_state.is_admin:
-        st.info("The 2-Minute Briefing for this word is currently missing. The Admin is running an automatic fix task to generate this content. Please check back later!")
+        st.info(f"The briefing is about {len(briefing['text'].split())} words long, providing a rich, 2-minute study session.")
     
     # --- Navigation Buttons ---
     col_prev, col_next = st.columns([1, 1])
@@ -978,7 +1011,6 @@ def admin_extraction_ui():
         
         if manual_submit:
             handle_manual_word_entry(manual_word)
-            return
 
     st.markdown("---")
     
@@ -998,14 +1030,18 @@ def admin_extraction_ui():
     col_audio_fix, col_briefing_gen = st.columns(2)
     
     with col_audio_fix:
-        if st.button("Attempt Bulk Audio Fix (Fix All Missing Pronunciations)", type="primary"):
-            handle_bulk_audio_fix()
-            return
+        st.button(
+            "Attempt Bulk Audio Fix (Fix All Missing Pronunciations)", 
+            on_click=handle_bulk_audio_fix, 
+            type="primary"
+        )
     
     with col_briefing_gen:
-        if st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings", type="secondary"):
-            auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH)
-            return
+        st.button(
+            f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings", 
+            on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH), 
+            type="secondary"
+        )
 
 
     st.markdown("---")
@@ -1019,11 +1055,10 @@ def admin_extraction_ui():
 
     if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words", type="secondary"): 
         handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False)
-        return
 
     st.markdown("---")
     
-    # --- Manual Cache Control (CRITICAL FIX APPLIED HERE) ---
+    # --- Manual Cache Control ---
     st.subheader("Manual Data Refresh (Cache Bust)")
     st.info(f"Current Cache Key: `{st.session_state.data_refresh_key}`. Increment to force a full data reload.")
     
@@ -1031,11 +1066,10 @@ def admin_extraction_ui():
         increment_data_refresh_key()
         st.session_state.vocab_data = None 
         st.rerun()
-        return # 🛑 FIX: The absolute return to stop execution and prevent the StreamlitAPIException
 
 
 # ======================================================================
-# 6. STREAMLIT APPLICATION STRUCTURE (MAIN)
+# 5. STREAMLIT APPLICATION STRUCTURE
 # ======================================================================
 
 def main():
@@ -1067,7 +1101,7 @@ def main():
             st.markdown(f"""
             **Admin Login:** `{ADMIN_EMAIL}` / `Jamshaid,1981`
             
-            **Note:** Use any email/6+ char password for general access.
+            **Note:** Use any email/6+ char password to simulate general user access.
             """)
             
         else:
@@ -1079,7 +1113,7 @@ def main():
                 
     # --- Main Content ---
     
-    # 🛑 Load data if logged in but data is not in session state (or cache key changed)
+    # 🛑 CHECK 1: Load data if logged in but data is not in session state
     if st.session_state.is_auth and st.session_state.vocab_data is None:
         load_and_update_vocabulary_data() 
         st.rerun()

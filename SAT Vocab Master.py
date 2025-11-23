@@ -7,7 +7,8 @@ from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field
 from pydantic import json_schema
-import tempfile # <--- New import for temporary file handling
+import tempfile 
+import re # <--- New import for regular expressions to clean the key
 
 # --- EXTERNAL API IMPORTS ---
 try:
@@ -48,25 +49,32 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# --- FIREBASE INITIALIZATION: NEW FILE-BASED METHOD (Robust against newline errors) ---
+# --- FIREBASE INITIALIZATION: FINAL ROBUST METHOD ---
 temp_file_path = None
 try:
     if "FIREBASE" not in st.secrets:
         raise KeyError("FIREBASE")
         
-    # 1. Get dictionary and make a copy using dict() instead of .copy()
-    # FIX: Use dict() to create a mutable copy, resolving the "no attribute 'copy'" error.
+    # 1. Get dictionary and make a mutable copy
     service_account_info = dict(st.secrets["FIREBASE"])
     
-    # 2. Fix private key newlines: This explicitly converts escaped newlines
-    # (like "\\n" which Streamlit sometimes provides) into actual newlines ("\n")
-    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+    # 2. Aggressive Private Key Cleaning
+    private_key_content = service_account_info["private_key"]
+    
+    # a) Fix escaped newlines (for certain environments)
+    cleaned_key = private_key_content.replace("\\n", "\n")
+    
+    # b) Use regex to remove any non-printable, illegal characters 
+    # that cause the InvalidData error, while preserving standard PEM format.
+    # This specifically targets hidden encoding issues.
+    cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', cleaned_key)
+    
+    service_account_info["private_key"] = cleaned_key
 
-    # 3. Write dictionary to a temporary JSON file. This is the most reliable way 
-    # to pass complex credentials to the Firebase Admin SDK on various platforms.
-    with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json') as f:
+    # 3. Write dictionary to a temporary JSON file path (secure method)
+    with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
         json.dump(service_account_info, f)
-        temp_file_path = f.name # Store path for cleanup
+        temp_file_path = f.name 
 
     # 4. Initialize Firebase using the temp JSON file path
     if not firebase_admin._apps:
@@ -81,17 +89,21 @@ except KeyError:
     st.stop()
     
 except Exception as e:
-    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. Check your **[FIREBASE]** secret for validity and permissions.")
+    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. If the key is new, this is likely a hidden encoding/whitespace issue. Please check your **[FIREBASE]** secret for validity and permissions.")
     st.stop()
     
 finally:
-    # 5. Cleanup: Attempt to delete the temporary file after initialization
+    # 5. Cleanup: Delete the temporary file
     if temp_file_path and os.path.exists(temp_file_path):
-        os.remove(temp_file_path)
+        try:
+            os.remove(temp_file_path)
+        except Exception as e:
+            # Non-critical failure: print, but don't stop the app
+            print(f"Warning: Failed to clean up temp file at {temp_file_path}. Error: {e}")
 # --- END NEW FIREBASE BLOCK ---
 
 
-# --- App State and Constants ---
+# --- App State and Constants (Unchanged) ---
 REQUIRED_WORD_COUNT = 2000 
 LOAD_BATCH_SIZE = 10 
 QUIZ_SIZE = 5 
@@ -1126,3 +1138,63 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
+
+You are absolutely right to be frustrated—this has been a long and tricky chain of errors!
+
+The issue is that the error message is constantly changing, indicating that we are successfully fixing one layer of the problem only to hit the next, deeper issue with the certificate format.
+
+### 🛑 Current Error and Final Solution
+
+The image you provided shows the latest error, which is the most specific and is caused by the Python cryptographic library rejecting the key:
+
+> **Failed to initialize a certificate credential. Caused by: "Unable to load PEM file. See... InvalidData(Invalid Byte(64, 46))".**
+
+This means, despite the code's aggressive cleaning, there is still an illegal character or formatting issue in the **data of the private key** itself.
+
+**The issue is no longer the Python code, Streamlit, or the method of reading the secret; the issue is the content of the `private_key` value in your `.streamlit/secrets.toml` file.**
+
+Here is the **final, definitive action plan** to permanently fix the integration issue, focused entirely on the secret content:
+
+### **Action Plan: Re-Secure and Clean the Secret**
+
+1.  **Generate a Brand New Key (Crucial Step):** The key you are using may be permanently corrupted with invisible characters from previous copy-paste operations.
+    * Go to your Firebase Project settings > Service accounts.
+    * Click **Generate new private key** and download the new JSON file.
+
+2.  **Use a Simple Text Editor (Not MS Word or Rich Text):** Open the new JSON file in a clean editor like VS Code, Sublime Text, or Notepad++.
+
+3.  **Manual Cleaning and Formatting (MANDATORY):**
+
+    * **Find the `private_key` value** in the new JSON file. It will be one very long string with `\n` characters embedded.
+    * **Copy the entire key string**, including the surrounding quotes:
+        ```json
+        "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+        ```
+    * **Paste and Clean in `secrets.toml`:** Open your `.streamlit/secrets.toml` file. Paste the **raw key string** into the `private_key` field, ensuring it uses the triple quotes, and that **there are no extra spaces or line breaks outside the Base64 data lines.**
+
+    You must ensure your `.streamlit/secrets.toml` looks exactly like this. **Pay special attention to the `private_key` lines.**
+
+    ```toml
+    # .streamlit/secrets.toml
+
+    GEMINI_API_KEY = "AIzaSyC25goPg5imM6Whsac5fQAjl0Vts0h8FQE"
+
+    [FIREBASE]
+    type = "service_account"
+    # Use the new values from your freshly downloaded JSON file
+    project_id = "sat-app-560ef" 
+    private_key_id = "NEW_KEY_ID_FROM_DOWNLOADED_JSON" 
+    
+    # 🛑 CRITICAL: Paste the content exactly as copied from the JSON, 
+    # but ensure it's wrapped in triple quotes, not single-line JSON escaped.
+    private_key = """
+    -----BEGIN PRIVATE KEY-----
+    [PASTE NEW, RAW, MULTI-LINE BASE64 DATA HERE]
+    -----END PRIVATE KEY-----
+    """
+    
+    # Use the new values from your freshly downloaded JSON file
+    client_email = "firebase-adminsdk-fbsvc@sat-app-560ef.iam.gserviceaccount.com"
+    client_id = "NEW_CLIENT_ID"
+    # ... rest of the fields ...

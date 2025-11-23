@@ -36,24 +36,26 @@ except ImportError:
 # ======================================================================
 
 # Check for API Key (Gemini)
-if "GEMINI_API_KEY" not in os.environ:
+# Using st.secrets notation for both keys for consistency
+if "GEMINI_API_KEY" not in st.secrets:
     st.error("🔴 GEMINI_API_KEY is missing! Please set it in your Streamlit Secrets.")
     st.stop()
 
 # Initialize Gemini Client
 try:
-    gemini_client = genai.Client()
+    # Read API key directly from st.secrets
+    gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# --- FIREBASE INITIALIZATION: NEW, CLEANER METHOD USING st.secrets TOML TABLE ---
+# --- FIREBASE INITIALIZATION: NEW METHOD USING st.secrets TOML TABLE ---
 try:
     if "FIREBASE" not in st.secrets:
         # Check for the correct TOML table name
         raise KeyError("FIREBASE")
         
-    # Streamlit automatically converts the TOML table into a Python dictionary
+    # Streamlit automatically converts the [FIREBASE] TOML table into a Python dictionary
     service_account_info = st.secrets["FIREBASE"]
 
     # Initialize the app only once
@@ -70,7 +72,7 @@ except KeyError:
     st.stop()
     
 except Exception as e:
-    # This catches genuine initialization errors (like a bad project ID or private key content)
+    # This catches genuine initialization errors (like an invalid PEM key)
     st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. Check your **[FIREBASE]** secret for validity and permissions.")
     st.stop()
 # --- END NEW FIREBASE BLOCK ---

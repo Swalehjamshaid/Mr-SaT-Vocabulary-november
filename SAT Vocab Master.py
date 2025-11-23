@@ -9,9 +9,9 @@ from pydantic import BaseModel, Field
 from pydantic import json_schema
 import tempfile 
 import re 
+import textwrap # <-- Required for guaranteed key formatting
 
 # --- EXTERNAL API IMPORTS ---
-# We import here so @st.cache_resource can access them inside the function
 try:
     from firebase_admin import credentials, initialize_app, firestore
     import firebase_admin
@@ -50,14 +50,15 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# --- CACHED FIREBASE INITIALIZATION ---
-
+# --- CACHED FIREBASE INITIALIZATION (FINAL, AGGRESSIVE CLEANING) ---
 @st.cache_resource
 def initialize_firestore():
     import firebase_admin
     from firebase_admin import credentials, firestore
     import tempfile
     import re
+    import json
+    import textwrap
 
     temp_file_path = None
     try:
@@ -80,28 +81,32 @@ def initialize_firestore():
         if not key_parts:
             raise ValueError("Private key parts (private_key_partN) or 'private_key' not found in secret.")
         
-        # CRITICAL FIX: Ensure key is a single string but contains the correct PEM newlines.
-        private_key_content = ''.join(key_parts).replace('\\n', '\n')
+        # 1. Get the raw string, remove ALL internal newlines/spaces, and markers.
+        private_key_content_raw = ''.join(key_parts)
         
-        # Second CRITICAL FIX: The key must be properly formatted with \n before writing to JSON file
-        # The Streamlit secret file uses \n literally. We must preserve the PEM format.
-        if 'BEGIN PRIVATE KEY' in private_key_content and '\n' not in private_key_content:
-             # Reconstruct PEM format with actual newlines
-            private_key_content = private_key_content.replace('-----END PRIVATE KEY-----', '\n-----END PRIVATE KEY-----')
-            private_key_content = private_key_content.replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN PRIVATE KEY-----\n')
-            # Insert internal newlines (assuming standard base64 chunking, though usually handled by the JSON dump)
-            # The .replace('\n', '\n') ensures that Streamlit secrets' escaped newlines are unescaped if they exist.
-        
-        # Clean rogue characters
-        cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', private_key_content)
-        service_account_info["private_key"] = cleaned_key
+        # Aggressive cleanup: remove all whitespace and explicit markers
+        private_key_content_clean = re.sub(r'[\s\n\r]+', '', private_key_content_raw)
+        payload = private_key_content_clean.replace("-----BEGINPRIVATEKEY-----", "")
+        payload = payload.replace("-----ENDPRIVATEKEY-----", "")
 
-        # Write dictionary to a temporary JSON file path
+        # 2. CRITICAL: Reconstruct the PEM format with perfect, guaranteed 64-character wrapping.
+        # This solves the ASN.1 parsing error.
+        wrapped_payload = textwrap.fill(payload, width=64)
+        
+        reconstructed_key = (
+            "-----BEGIN PRIVATE KEY-----\n" + 
+            wrapped_payload + 
+            "\n-----END PRIVATE KEY-----\n"
+        )
+        
+        service_account_info["private_key"] = reconstructed_key
+
+        # 3. Write dictionary to a temporary JSON file path (secure method)
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
             json.dump(service_account_info, f)
             temp_file_path = f.name 
 
-        # Initialize Firebase
+        # 4. Initialize Firebase
         if not firebase_admin._apps:
             cred = credentials.Certificate(temp_file_path)
             firebase_admin.initialize_app(cred)
@@ -110,11 +115,10 @@ def initialize_firestore():
         return db.collection("sat_vocabulary")
         
     except Exception as e:
-        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. Check key format.")
+        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: Failed to initialize a certificate credential. Please check your **secrets.toml** key format for stray characters or missing quotes. Error detail: {e}")
         st.stop()
         
     finally:
-        # Cleanup: Delete the temporary file
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.remove(temp_file_path)

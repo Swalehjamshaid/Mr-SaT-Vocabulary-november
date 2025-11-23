@@ -35,7 +35,7 @@ except ImportError:
 
 
 # ======================================================================
-# 1. SETUP & INITIALIZATION (Monolithic Secret Based & Cached)
+# 1. SETUP & INITIALIZATION (Monolithic Secret Based & Case-Insensitive)
 # ======================================================================
 
 # --- FIREBASE INITIALIZATION (Reads Monolithic Private Key) ---
@@ -48,12 +48,14 @@ def initialize_firestore():
     
     temp_file_path = None
     try:
-        # 1. Check for the FIREBASE table in st.secrets
-        if "FIREBASE" not in st.secrets:
-            st.error("🔴 FIREBASE table not found in Streamlit Secrets. ACTION: Check your TOML format.")
+        # 1. CRITICAL FIX: Find the FIREBASE table name regardless of case
+        firebase_secret_key = next((key for key in st.secrets.keys() if key.upper() == "FIREBASE"), None)
+
+        if not firebase_secret_key:
+            st.error("🔴 FIREBASE secret table not found in Streamlit Secrets. ACTION: Ensure you have a section like [FIREBASE] in your TOML.")
             raise KeyError("FIREBASE")
             
-        service_account_info = dict(st.secrets["FIREBASE"])
+        service_account_info = dict(st.secrets[firebase_secret_key])
 
         # 2. Check for the monolithic 'private_key' field
         if 'private_key' not in service_account_info:
@@ -62,18 +64,21 @@ def initialize_firestore():
         
         private_key_content = service_account_info['private_key']
         
-        # 3. CRITICAL: Clean up newlines for PEM format. This is the fix for ASN.1 parsing errors.
-        # This replaces any escaped or double-escaped newlines with a single newline character.
+        # 3. CRITICAL: Clean up newlines for PEM format. (Fixes ASN.1 parsing errors)
+        # This handles keys pasted using triple quotes or single quotes correctly.
         cleaned_key = private_key_content.replace('\\n', '\n').replace('\r', '')
 
+        # 4. Update the dictionary with the cleaned key
         service_account_info["private_key"] = cleaned_key
+        # Update private_key_id in case the TOML structure changed it
+        service_account_info["private_key_id"] = service_account_info.get("private_key_id", "default_id")
 
-        # 4. Write dictionary to a temporary JSON file (required by credentials.Certificate)
+        # 5. Write dictionary to a temporary JSON file (required by credentials.Certificate)
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
             json.dump(service_account_info, f)
             temp_file_path = f.name 
 
-        # 5. Initialize Firebase
+        # 6. Initialize Firebase
         if not firebase_admin._apps:
             cred = credentials.Certificate(temp_file_path)
             firebase_admin.initialize_app(cred)
@@ -83,7 +88,7 @@ def initialize_firestore():
         
     except Exception as e:
         # The ultimate catch: This error means the app can't authenticate.
-        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. **Action: Ensure the Python code and the Streamlit Secrets are using the monolithic structure correctly.**")
+        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. **Action: Ensure the private key is not truncated and is correctly quoted in the secrets file.**")
         st.stop()
         
     finally:

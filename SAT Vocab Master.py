@@ -12,6 +12,7 @@ import re
 import textwrap 
 
 # --- EXTERNAL API IMPORTS ---
+# We use try/except for clear error messages if packages are missing
 try:
     from firebase_admin import credentials, initialize_app, firestore
     import firebase_admin
@@ -38,20 +39,19 @@ except ImportError:
 # 1. SETUP & INITIALIZATION (Multi-Part Secret Based & Cached)
 # ======================================================================
 
-# --- FIREBASE INITIALIZATION ---
+# --- FIREBASE INITIALIZATION (Reads Multi-Part Secrets) ---
 @st.cache_resource
 def initialize_firestore():
     import firebase_admin
     from firebase_admin import credentials, firestore
     import tempfile
-    import re
     import json
     
     temp_file_path = None
     try:
         # 1. Check for the FIREBASE table in st.secrets
         if "FIREBASE" not in st.secrets:
-            st.error("🔴 FIREBASE table not found in Streamlit Secrets. Check your TOML format.")
+            st.error("🔴 FIREBASE table not found in Streamlit Secrets. ACTION: Check your TOML format.")
             raise KeyError("FIREBASE")
             
         service_account_info = dict(st.secrets["FIREBASE"])
@@ -59,6 +59,7 @@ def initialize_firestore():
         i = 1
         
         # 2. Reassemble the Private Key from parts (private_key_part1, part2, etc.)
+        # This loop is designed to read the split key and assemble it safely.
         while True:
             part_name = f"private_key_part{i}"
             if part_name in service_account_info:
@@ -95,7 +96,7 @@ def initialize_firestore():
         
     except Exception as e:
         # The ultimate catch: This error means the app can't authenticate.
-        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. **Action: Re-verify the TOML format and ensure parts are fully pasted.**")
+        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. **Action: Ensure both the Python code and the Streamlit Secrets are using the multi-part structure correctly.**")
         st.stop()
         
     finally:
@@ -124,37 +125,6 @@ try:
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
-
-
-# --- App State and Constants (Unchanged) ---
-REQUIRED_WORD_COUNT = 2000 
-LOAD_BATCH_SIZE = 10 
-QUIZ_SIZE = 5 
-AUTO_FETCH_THRESHOLD = 50 
-AUTO_FETCH_BATCH = 25 
-BRIEFING_BATCH_SIZE = 10 
-MANUAL_BRIEFING_BATCH = 50 
-
-# Admin Configuration (Mock Login)
-ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
-ADMIN_PASSWORD = "Jamshaid,1981" 
-MANUAL_EXTRACT_BATCH = 50 
-
-# Pydantic Schema for Vocabulary Word (Ensures data structure)
-class SatWord(BaseModel):
-    """Pydantic model for a vocabulary word, defining required structure."""
-    word: str = Field(description="The SAT-level word.")
-    pronunciation: str = Field(description="Simple, hyphenated phonetic pronunciation (e.g., eh-FEM-er-al).")
-    definition: str = Field(description="The concise dictionary definition.")
-    tip: str = Field(description="A short, catchy mnemonic memory tip.")
-    usage: str = Field(description="A professional sample usage sentence.")
-    sat_level: str = Field(default="High", description="Should always be 'High'.")
-    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for word pronunciation.")
-    created_at: float = Field(default_factory=time.time)
-    
-    # PERMANENTLY STORED BRIEFING FIELDS (2-Minute Overview)
-    briefing_text: Optional[str] = Field(default=None, description="The extended AI-generated briefing text.")
-    briefing_audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for the briefing.")
 
 
 # ======================================================================

@@ -34,7 +34,7 @@ except ImportError:
 
 
 # ======================================================================
-# 1. SETUP & INITIALIZATION
+# 1. SETUP & INITIALIZATION (Optimized Firebase Block)
 # ======================================================================
 
 # Check for API Key (Gemini)
@@ -49,73 +49,79 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# --- FIREBASE INITIALIZATION: FINAL SPLIT KEY METHOD ---
-temp_file_path = None
-try:
-    # 1. Check for the FIREBASE dictionary 
-    if "FIREBASE" not in st.secrets:
-        raise KeyError("FIREBASE")
-        
-    # 2. Get dictionary and make a mutable copy
-    service_account_info = dict(st.secrets["FIREBASE"])
-    
-    # 3. CONCATENATE THE SPLIT PRIVATE KEY
-    
-    # Identify all private key parts and sort them numerically (part1, part2, etc.)
-    key_parts = []
-    i = 1
-    while True:
-        part_name = f"private_key_part{i}"
-        if part_name in service_account_info:
-            key_parts.append(service_account_info.pop(part_name))
-            i += 1
-        else:
-            # If standard private_key exists as a fallback (single monolithic key)
-            if 'private_key' in service_account_info and not key_parts:
-                key_parts.append(service_account_info.pop('private_key'))
-            break
+# --- CACHED FIREBASE INITIALIZATION ---
+
+@st.cache_resource
+def initialize_firestore():
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    import tempfile
+    import re
+
+    temp_file_path = None
+    try:
+        # 1. Check for the FIREBASE dictionary 
+        if "FIREBASE" not in st.secrets:
+            raise KeyError("FIREBASE")
             
-    if not key_parts:
-        raise ValueError("Private key parts (private_key_partN) or 'private_key' not found in secret.")
-    
-    # Reassemble the key with required newlines
-    # Join parts with a newline, which is essential for PEM format
-    private_key_content = '\n'.join(key_parts)
-    
-    # Aggressive Cleaning (Fix any rogue chars that survived)
-    cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', private_key_content)
-    
-    service_account_info["private_key"] = cleaned_key
+        service_account_info = dict(st.secrets["FIREBASE"])
+        key_parts = []
+        i = 1
+        while True:
+            part_name = f"private_key_part{i}"
+            if part_name in service_account_info:
+                key_parts.append(service_account_info.pop(part_name))
+                i += 1
+            else:
+                # Fallback to monolithic key (handles your secret format)
+                if 'private_key' in service_account_info and not key_parts:
+                    key_parts.append(service_account_info.pop('private_key'))
+                break
+                
+        if not key_parts:
+            raise ValueError("Private key parts (private_key_partN) or 'private_key' not found in secret.")
+        
+        private_key_content = '\n'.join(key_parts)
+        cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', private_key_content)
+        service_account_info["private_key"] = cleaned_key
 
-    # 4. Write dictionary to a temporary JSON file path (secure method)
-    with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
-        json.dump(service_account_info, f)
-        temp_file_path = f.name 
+        # 4. Write dictionary to a temporary JSON file path (secure method)
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
+            json.dump(service_account_info, f)
+            temp_file_path = f.name 
 
-    # 5. Initialize Firebase using the temp JSON file path
-    if not firebase_admin._apps:
-        cred = credentials.Certificate(temp_file_path)
-        initialize_app(cred, name="vocab_builder_app") 
+        # 5. Initialize Firebase using the temp JSON file path
+        # Using the check inside the resource cache for double safety
+        if not firebase_admin._apps:
+            cred = credentials.Certificate(temp_file_path)
+            firebase_admin.initialize_app(cred)
 
-    db = firestore.client() 
-    VOCAB_COLLECTION = db.collection("sat_vocabulary")
-    
-except KeyError as e:
-    st.error(f"🔴 FIREBASE SETUP FAILED: Key {e} was not found. Please ensure the secret structure is correct.")
+        db = firestore.client() 
+        return db.collection("sat_vocabulary")
+        
+    except KeyError as e:
+        st.error(f"🔴 FIREBASE SETUP FAILED: Key {e} was not found. Please ensure the secret structure is correct.")
+        st.stop()
+        
+    except Exception as e:
+        st.error(f"🔴 FIREBASE INITIALIZATION FAILED: Failed to initialize certificate credential. Caused by: {e}. **ACTION: Please check the entire key structure in the secret file is complete and not truncated.**")
+        st.stop()
+        
+    finally:
+        # 6. Cleanup: Delete the temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception as e:
+                print(f"Warning: Failed to clean up temp file at {temp_file_path}. Error: {e}")
+
+# Call the cached function and establish global Firestore objects
+try:
+    VOCAB_COLLECTION = initialize_firestore()
+    # db is technically part of the collection object, but this is cleaner
+    db = VOCAB_COLLECTION.firestore 
+except Exception:
     st.stop()
-    
-except Exception as e:
-    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: Failed to initialize certificate credential. Caused by: {e}. **ACTION: Please check the entire key structure in the secret file is complete and not truncated.**")
-    st.stop()
-    
-finally:
-    # 6. Cleanup: Delete the temporary file
-    if temp_file_path and os.path.exists(temp_file_path):
-        try:
-            os.remove(temp_file_path)
-        except Exception as e:
-            print(f"Warning: Failed to clean up temp file at {temp_file_path}. Error: {e}")
-# --- END NEW FIREBASE BLOCK ---
 
 
 # --- App State and Constants (Unchanged) ---

@@ -35,7 +35,7 @@ except ImportError:
 
 
 # ======================================================================
-# 1. SETUP & INITIALIZATION (Environment Variable Based)
+# 1. SETUP & INITIALIZATION (Environment Variable Based & Cached)
 # ======================================================================
 
 # --- FIREBASE INITIALIZATION ---
@@ -45,16 +45,33 @@ def initialize_firebase_from_env():
     service_account_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
     
     if not service_account_json:
-        st.error("🔴 FIREBASE_SERVICE_ACCOUNT environment variable is missing!")
+        st.error("🔴 FIREBASE_SERVICE_ACCOUNT environment variable is missing! Check your deployment settings.")
         st.stop()
 
     try:
         # 2. Parse the JSON string
         service_account_info = json.loads(service_account_json)
         
-        # 3. Fix the private key newlines (essential for cloud environment strings)
-        # We assume the key has been escaped (\n) in the environment setting
-        service_account_info['private_key'] = service_account_info['private_key'].replace('\\n', '\n')
+        # 3. Aggressively fix the private key format for cryptography/PEM parser
+        private_key_content_raw = service_account_info['private_key']
+        
+        # Clean up corrupted/stray characters/newlines from cloud environment
+        private_key_content_clean = re.sub(r'[\s\n\r]+', '', private_key_content_raw)
+        
+        # Remove PEM markers if they exist, leaving only the Base64 payload
+        payload = private_key_content_clean.replace("-----BEGINPRIVATEKEY-----", "")
+        payload = payload.replace("-----ENDPRIVATEKEY-----", "")
+
+        # Reconstruct the PEM format with perfect, guaranteed 64-character wrapping.
+        wrapped_payload = textwrap.fill(payload, width=64)
+        
+        reconstructed_key = (
+            "-----BEGIN PRIVATE KEY-----\n" + 
+            wrapped_payload + 
+            "\n-----END PRIVATE KEY-----\n"
+        )
+        
+        service_account_info["private_key"] = reconstructed_key
         
         # 4. Initialize Firebase (only if not already done)
         if not firebase_admin._apps:
@@ -65,7 +82,8 @@ def initialize_firebase_from_env():
         return db.collection("sat_vocabulary")
         
     except Exception as e:
-        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. Ensure FIREBASE_SERVICE_ACCOUNT is valid JSON.")
+        # This catch is for the corrupted key or invalid JSON error
+        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. Check FIREBASE_SERVICE_ACCOUNT JSON/key format.")
         st.stop()
 
 # Initialize Firebase and Firestore collection
@@ -76,11 +94,11 @@ except Exception:
     st.stop()
 
 
-# --- GEMINI CLIENT INITIALIZATION ---
+# --- GEMINI CLIENT (Google API) INITIALIZATION ---
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
 
 if not gemini_api_key:
-    st.error("🔴 GEMINI_API_KEY environment variable is missing!")
+    st.error("🔴 GEMINI_API_KEY environment variable is missing! Check your deployment settings.")
     st.stop()
 
 try:

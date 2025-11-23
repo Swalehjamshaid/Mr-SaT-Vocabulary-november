@@ -49,36 +49,50 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# --- FIREBASE INITIALIZATION: FINAL JSON STRING METHOD ---
+# --- FIREBASE INITIALIZATION: FINAL SPLIT KEY METHOD ---
 temp_file_path = None
 try:
-    # 1. Check for the single, monolithic secret key
-    if "FIREBASE_SERVICE_ACCOUNT" not in st.secrets:
-        raise KeyError("FIREBASE_SERVICE_ACCOUNT")
+    # 1. Check for the FIREBASE dictionary 
+    if "FIREBASE" not in st.secrets:
+        raise KeyError("FIREBASE")
         
-    # 2. Get the entire JSON string value
-    service_account_json_string = st.secrets["FIREBASE_SERVICE_ACCOUNT"]
+    # 2. Get dictionary and make a mutable copy
+    service_account_info = dict(st.secrets["FIREBASE"])
     
-    # 3. Parse the JSON string into a Python dictionary
-    service_account_info = json.loads(service_account_json_string)
+    # 3. CONCATENATE THE SPLIT PRIVATE KEY
     
-    # 4. Aggressive Private Key Cleaning (Fix escaped newlines and invalid characters)
-    private_key_content = service_account_info["private_key"]
+    # Identify all private key parts and sort them numerically (part1, part2, etc.)
+    key_parts = []
+    i = 1
+    while True:
+        part_name = f"private_key_part{i}"
+        if part_name in service_account_info:
+            key_parts.append(service_account_info.pop(part_name))
+            i += 1
+        else:
+            # If standard private_key exists as a fallback (single monolithic key)
+            if 'private_key' in service_account_info and not key_parts:
+                key_parts.append(service_account_info.pop('private_key'))
+            break
+            
+    if not key_parts:
+         raise ValueError("Private key parts (private_key_partN) or 'private_key' not found in secret.")
     
-    # Fix escaped newlines: This explicitly converts JSON-escaped newlines ("\n")
-    # into actual newlines ("\n"), which is necessary for the PEM format.
-    cleaned_key = private_key_content.replace("\\n", "\n")
+    # Reassemble the key with required newlines
+    # Join parts with a newline, which is essential for PEM format
+    private_key_content = '\n'.join(key_parts)
     
-    # Use regex to remove any non-printable, illegal characters (our last persistent error)
-    cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', cleaned_key)
+    # Aggressive Cleaning (Fix any rogue chars that survived)
+    cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', private_key_content)
+    
     service_account_info["private_key"] = cleaned_key
 
-    # 5. Write dictionary to a temporary JSON file path (secure method)
+    # 4. Write dictionary to a temporary JSON file path (secure method)
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
         json.dump(service_account_info, f)
         temp_file_path = f.name 
 
-    # 6. Initialize Firebase using the temp JSON file path
+    # 5. Initialize Firebase using the temp JSON file path
     if not firebase_admin._apps:
         cred = credentials.Certificate(temp_file_path)
         initialize_app(cred, name="vocab_builder_app") 
@@ -86,20 +100,16 @@ try:
     db = firestore.client() 
     VOCAB_COLLECTION = db.collection("sat_vocabulary")
     
-except KeyError:
-    st.error("🔴 FIREBASE SETUP FAILED: The required secret **FIREBASE_SERVICE_ACCOUNT** was not found. Please check your secrets name.")
-    st.stop()
-    
-except json.JSONDecodeError as e:
-    st.error(f"🔴 FIREBASE SETUP FAILED: The secret key format is invalid JSON. Error: {e}. Ensure the entire key is a single, valid JSON string.")
+except KeyError as e:
+    st.error(f"🔴 FIREBASE SETUP FAILED: Key {e} was not found. Please ensure the secret structure is correct.")
     st.stop()
     
 except Exception as e:
-    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. The key content may be invalid or corrupted.")
+    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: Failed to initialize certificate credential. Caused by: {e}. **ACTION: Please check the entire key structure in the secret file is complete and not truncated.**")
     st.stop()
     
 finally:
-    # 7. Cleanup: Delete the temporary file
+    # 6. Cleanup: Delete the temporary file
     if temp_file_path and os.path.exists(temp_file_path):
         try:
             os.remove(temp_file_path)
@@ -856,7 +866,7 @@ def generate_quiz_ui():
     
     with st.form(key="full_quiz_form"):
         st.subheader(f"Answer the following {QUIZ_SIZE} questions:")
-        st.caption(f"Testing words **{start_word_num}** to **{end_word_num}**.")
+        st.caption(f"Testing words **start_word_num** to **end_word_num**.")
         
         st.session_state.user_responses = [] 
         

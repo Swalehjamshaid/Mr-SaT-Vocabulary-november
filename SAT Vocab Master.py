@@ -47,57 +47,33 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# Aggressive secret cleaning and Firebase initialization
+# --- FIREBASE INITIALIZATION: NEW, CLEANER METHOD USING st.secrets TOML TABLE ---
 try:
-    secret_value = os.environ["FIREBASE_SERVICE_ACCOUNT"]
-    
-    # --- JSON CLEANING ATTEMPTS ---
-    # Attempt to clean potential Streamlit-added quotes/wrappers
-    cleaned_value = secret_value.strip().strip("'").strip('"')
-    
-    # Normalize potential triple quotes from Streamlit Secrets formatting
-    # If the secret was defined with """...""" in secrets.toml, Streamlit may wrap it.
-    if cleaned_value.startswith('"""') and cleaned_value.endswith('"""'):
-        cleaned_value = cleaned_value[3:-3].strip()
+    if "FIREBASE" not in st.secrets:
+        # Check for the correct TOML table name
+        raise KeyError("FIREBASE")
+        
+    # Streamlit automatically converts the TOML table into a Python dictionary
+    service_account_info = st.secrets["FIREBASE"]
 
-    # --- JSON LOADING ---
-    service_account_info = json.loads(cleaned_value)
-    
-    # --- PRIVATE KEY NORMALIZATION ---
-    if 'private_key' in service_account_info:
-        raw_key = service_account_info['private_key']
-        # Normalize private key format, ensuring newlines are correctly handled
-        cleaned_key = raw_key.strip()
-        cleaned_key = cleaned_key.replace("-----BEGINPRIVATEKEY-----", "-----BEGIN PRIVATE KEY-----")
-        cleaned_key = cleaned_key.replace("-----ENDPRIVATEKEY-----", "-----END PRIVATE KEY-----")
-        service_account_info['private_key'] = cleaned_key
-
-    # --- FIREBASE INITIALIZATION ---
+    # Initialize the app only once
     if not firebase_admin._apps:
+        # credentials.Certificate takes the Python dictionary directly
         cred = credentials.Certificate(service_account_info)
-        # Use initialize_app without an explicit name if you only plan to use one app
-        # or use a unique name if required, but the structure is correct.
         initialize_app(cred, name="vocab_builder_app") 
 
     db = firestore.client() 
     VOCAB_COLLECTION = db.collection("sat_vocabulary")
     
 except KeyError:
-    st.error("🔴 FIREBASE SETUP FAILED: 'FIREBASE_SERVICE_ACCOUNT' secret not found. Data cannot be saved permanently.")
+    st.error("🔴 FIREBASE SETUP FAILED: The required secret **[FIREBASE]** table was not found in `secrets.toml`.")
     st.stop()
     
-except json.JSONDecodeError as e:
-    # Explicitly catch the JSON error, which is the most likely cause
-    st.error(f"🔴 FIREBASE JSON DECODE FAILED: The secret key format is invalid JSON. Error: {e}")
-    st.markdown("---")
-    st.code(f"Failed to parse content (first 100 chars): {cleaned_value[:100]}...", language="json")
-    st.error("ACTION: Check your `.streamlit/secrets.toml` or Streamlit Cloud secret for correct JSON formatting (especially quotes and newlines).")
-    st.stop()
-
 except Exception as e:
-    # Catch any other initialization errors (e.g., malformed credentials object)
-    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. Check server logs for details.")
+    # This catches genuine initialization errors (like a bad project ID or private key content)
+    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. Check your **[FIREBASE]** secret for validity and permissions.")
     st.stop()
+# --- END NEW FIREBASE BLOCK ---
 
 
 # --- App State and Constants ---

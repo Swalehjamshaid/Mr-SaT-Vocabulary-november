@@ -54,8 +54,9 @@ try:
     if "FIREBASE" not in st.secrets:
         raise KeyError("FIREBASE")
         
-    # 1. Get dictionary and make a copy to modify
-    service_account_info = st.secrets["FIREBASE"].copy()
+    # 1. Get dictionary and make a copy using dict() instead of .copy()
+    # FIX: Use dict() to create a mutable copy, resolving the "no attribute 'copy'" error.
+    service_account_info = dict(st.secrets["FIREBASE"])
     
     # 2. Fix private key newlines: This explicitly converts escaped newlines
     # (like "\\n" which Streamlit sometimes provides) into actual newlines ("\n")

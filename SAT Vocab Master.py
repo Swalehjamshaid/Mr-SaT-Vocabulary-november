@@ -11,6 +11,7 @@ import tempfile
 import re 
 
 # --- EXTERNAL API IMPORTS ---
+# We import here so @st.cache_resource can access them inside the function
 try:
     from firebase_admin import credentials, initialize_app, firestore
     import firebase_admin
@@ -60,7 +61,6 @@ def initialize_firestore():
 
     temp_file_path = None
     try:
-        # 1. Check for the FIREBASE dictionary 
         if "FIREBASE" not in st.secrets:
             raise KeyError("FIREBASE")
             
@@ -73,7 +73,6 @@ def initialize_firestore():
                 key_parts.append(service_account_info.pop(part_name))
                 i += 1
             else:
-                # Fallback to monolithic key (handles your secret format)
                 if 'private_key' in service_account_info and not key_parts:
                     key_parts.append(service_account_info.pop('private_key'))
                 break
@@ -81,17 +80,28 @@ def initialize_firestore():
         if not key_parts:
             raise ValueError("Private key parts (private_key_partN) or 'private_key' not found in secret.")
         
-        private_key_content = '\n'.join(key_parts)
+        # CRITICAL FIX: Ensure key is a single string but contains the correct PEM newlines.
+        private_key_content = ''.join(key_parts).replace('\\n', '\n')
+        
+        # Second CRITICAL FIX: The key must be properly formatted with \n before writing to JSON file
+        # The Streamlit secret file uses \n literally. We must preserve the PEM format.
+        if 'BEGIN PRIVATE KEY' in private_key_content and '\n' not in private_key_content:
+             # Reconstruct PEM format with actual newlines
+            private_key_content = private_key_content.replace('-----END PRIVATE KEY-----', '\n-----END PRIVATE KEY-----')
+            private_key_content = private_key_content.replace('-----BEGIN PRIVATE KEY-----', '-----BEGIN PRIVATE KEY-----\n')
+            # Insert internal newlines (assuming standard base64 chunking, though usually handled by the JSON dump)
+            # The .replace('\n', '\n') ensures that Streamlit secrets' escaped newlines are unescaped if they exist.
+        
+        # Clean rogue characters
         cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', private_key_content)
         service_account_info["private_key"] = cleaned_key
 
-        # 4. Write dictionary to a temporary JSON file path (secure method)
+        # Write dictionary to a temporary JSON file path
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
             json.dump(service_account_info, f)
             temp_file_path = f.name 
 
-        # 5. Initialize Firebase using the temp JSON file path
-        # Using the check inside the resource cache for double safety
+        # Initialize Firebase
         if not firebase_admin._apps:
             cred = credentials.Certificate(temp_file_path)
             firebase_admin.initialize_app(cred)
@@ -99,16 +109,12 @@ def initialize_firestore():
         db = firestore.client() 
         return db.collection("sat_vocabulary")
         
-    except KeyError as e:
-        st.error(f"🔴 FIREBASE SETUP FAILED: Key {e} was not found. Please ensure the secret structure is correct.")
-        st.stop()
-        
     except Exception as e:
-        st.error(f"🔴 FIREBASE INITIALIZATION FAILED: Failed to initialize certificate credential. Caused by: {e}. **ACTION: Please check the entire key structure in the secret file is complete and not truncated.**")
+        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. Check key format.")
         st.stop()
         
     finally:
-        # 6. Cleanup: Delete the temporary file
+        # Cleanup: Delete the temporary file
         if temp_file_path and os.path.exists(temp_file_path):
             try:
                 os.remove(temp_file_path)
@@ -118,7 +124,6 @@ def initialize_firestore():
 # Call the cached function and establish global Firestore objects
 try:
     VOCAB_COLLECTION = initialize_firestore()
-    # db is technically part of the collection object, but this is cleaner
     db = VOCAB_COLLECTION.firestore 
 except Exception:
     st.stop()

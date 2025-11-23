@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 from pydantic import json_schema
 import tempfile 
 import re 
-import textwrap # For guaranteed key formatting
+import textwrap 
 
 # --- EXTERNAL API IMPORTS ---
 try:
@@ -35,74 +35,92 @@ except ImportError:
 
 
 # ======================================================================
-# 1. SETUP & INITIALIZATION (Environment Variable Based & Cached)
+# 1. SETUP & INITIALIZATION (Multi-Part Secret Based & Cached)
 # ======================================================================
 
 # --- FIREBASE INITIALIZATION ---
 @st.cache_resource
-def initialize_firebase_from_env():
-    # 1. Get Firebase Service Account JSON from environment variable
-    service_account_json = os.environ.get('FIREBASE_SERVICE_ACCOUNT')
+def initialize_firestore():
+    import firebase_admin
+    from firebase_admin import credentials, firestore
+    import tempfile
+    import re
+    import json
     
-    if not service_account_json:
-        st.error("🔴 FIREBASE_SERVICE_ACCOUNT environment variable is missing! Check your deployment settings.")
-        st.stop()
-
+    temp_file_path = None
     try:
-        # 2. Parse the JSON string
-        service_account_info = json.loads(service_account_json)
+        # 1. Check for the FIREBASE table in st.secrets
+        if "FIREBASE" not in st.secrets:
+            st.error("🔴 FIREBASE table not found in Streamlit Secrets. Check your TOML format.")
+            raise KeyError("FIREBASE")
+            
+        service_account_info = dict(st.secrets["FIREBASE"])
+        key_parts = []
+        i = 1
         
-        # 3. Aggressively fix the private key format for cryptography/PEM parser
-        private_key_content_raw = service_account_info['private_key']
+        # 2. Reassemble the Private Key from parts (private_key_part1, part2, etc.)
+        while True:
+            part_name = f"private_key_part{i}"
+            if part_name in service_account_info:
+                key_parts.append(service_account_info.pop(part_name))
+                i += 1
+            else:
+                # Fallback: check for the monolithic 'private_key' if parts aren't used
+                if 'private_key' in service_account_info and not key_parts:
+                    key_parts.append(service_account_info.pop('private_key'))
+                break
+                
+        if not key_parts:
+            raise ValueError("Private key parts or 'private_key' field not found in secret.")
         
-        # Clean up corrupted/stray characters/newlines from cloud environment
-        private_key_content_clean = re.sub(r'[\s\n\r]+', '', private_key_content_raw)
+        # 3. Clean and reconstruct the private key string
+        private_key_content = ''.join(key_parts)
+        # Fix escaped newlines if they came from the TOML string format
+        cleaned_key = private_key_content.replace('\\n', '\n')
         
-        # Remove PEM markers if they exist, leaving only the Base64 payload
-        payload = private_key_content_clean.replace("-----BEGINPRIVATEKEY-----", "")
-        payload = payload.replace("-----ENDPRIVATEKEY-----", "")
+        service_account_info["private_key"] = cleaned_key
 
-        # Reconstruct the PEM format with perfect, guaranteed 64-character wrapping.
-        wrapped_payload = textwrap.fill(payload, width=64)
-        
-        reconstructed_key = (
-            "-----BEGIN PRIVATE KEY-----\n" + 
-            wrapped_payload + 
-            "\n-----END PRIVATE KEY-----\n"
-        )
-        
-        service_account_info["private_key"] = reconstructed_key
-        
-        # 4. Initialize Firebase (only if not already done)
+        # 4. Write dictionary to a temporary JSON file (required by credentials.Certificate)
+        with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
+            json.dump(service_account_info, f)
+            temp_file_path = f.name 
+
+        # 5. Initialize Firebase
         if not firebase_admin._apps:
-            cred = credentials.Certificate(service_account_info)
+            cred = credentials.Certificate(temp_file_path)
             firebase_admin.initialize_app(cred)
 
         db = firestore.client() 
         return db.collection("sat_vocabulary")
         
     except Exception as e:
-        # This catch is for the corrupted key or invalid JSON error
-        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. Check FIREBASE_SERVICE_ACCOUNT JSON/key format.")
+        # The ultimate catch: This error means the app can't authenticate.
+        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. **Action: Re-verify the TOML format and ensure parts are fully pasted.**")
         st.stop()
+        
+    finally:
+        # Cleanup the temporary file
+        if temp_file_path and os.path.exists(temp_file_path):
+            try:
+                os.remove(temp_file_path)
+            except Exception:
+                pass 
 
 # Initialize Firebase and Firestore collection
 try:
-    VOCAB_COLLECTION = initialize_firebase_from_env()
+    VOCAB_COLLECTION = initialize_firestore()
     db = VOCAB_COLLECTION.firestore 
 except Exception:
     st.stop()
 
 
 # --- GEMINI CLIENT (Google API) INITIALIZATION ---
-gemini_api_key = os.environ.get('GEMINI_API_KEY')
-
-if not gemini_api_key:
-    st.error("🔴 GEMINI_API_KEY environment variable is missing! Check your deployment settings.")
+if "GEMINI_API_KEY" not in st.secrets:
+    st.error("🔴 GEMINI_API_KEY is missing! Please set it in your Streamlit Secrets.")
     st.stop()
 
 try:
-    gemini_client = genai.Client(api_key=gemini_api_key)
+    gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()

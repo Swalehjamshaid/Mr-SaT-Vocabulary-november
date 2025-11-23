@@ -12,7 +12,6 @@ import re
 import textwrap 
 
 # --- EXTERNAL API IMPORTS ---
-# We use try/except for clear error messages if packages are missing
 try:
     from firebase_admin import credentials, initialize_app, firestore
     import firebase_admin
@@ -36,10 +35,10 @@ except ImportError:
 
 
 # ======================================================================
-# 1. SETUP & INITIALIZATION (Multi-Part Secret Based & Cached)
+# 1. SETUP & INITIALIZATION (Monolithic Secret Based & Cached)
 # ======================================================================
 
-# --- FIREBASE INITIALIZATION (Reads Multi-Part Secrets) ---
+# --- FIREBASE INITIALIZATION (Reads Monolithic Private Key) ---
 @st.cache_resource
 def initialize_firestore():
     import firebase_admin
@@ -55,30 +54,18 @@ def initialize_firestore():
             raise KeyError("FIREBASE")
             
         service_account_info = dict(st.secrets["FIREBASE"])
-        key_parts = []
-        i = 1
+
+        # 2. Check for the monolithic 'private_key' field
+        if 'private_key' not in service_account_info:
+             st.error("🔴 'private_key' field missing from [FIREBASE] secrets. Check your TOML structure.")
+             raise KeyError("private_key")
         
-        # 2. Reassemble the Private Key from parts (private_key_part1, part2, etc.)
-        # This loop is designed to read the split key and assemble it safely.
-        while True:
-            part_name = f"private_key_part{i}"
-            if part_name in service_account_info:
-                key_parts.append(service_account_info.pop(part_name))
-                i += 1
-            else:
-                # Fallback: check for the monolithic 'private_key' if parts aren't used
-                if 'private_key' in service_account_info and not key_parts:
-                    key_parts.append(service_account_info.pop('private_key'))
-                break
-                
-        if not key_parts:
-            raise ValueError("Private key parts or 'private_key' field not found in secret.")
+        private_key_content = service_account_info['private_key']
         
-        # 3. Clean and reconstruct the private key string
-        private_key_content = ''.join(key_parts)
-        # Fix escaped newlines if they came from the TOML string format
-        cleaned_key = private_key_content.replace('\\n', '\n')
-        
+        # 3. CRITICAL: Clean up newlines for PEM format. This is the fix for ASN.1 parsing errors.
+        # This replaces any escaped or double-escaped newlines with a single newline character.
+        cleaned_key = private_key_content.replace('\\n', '\n').replace('\r', '')
+
         service_account_info["private_key"] = cleaned_key
 
         # 4. Write dictionary to a temporary JSON file (required by credentials.Certificate)
@@ -96,7 +83,7 @@ def initialize_firestore():
         
     except Exception as e:
         # The ultimate catch: This error means the app can't authenticate.
-        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. **Action: Ensure both the Python code and the Streamlit Secrets are using the multi-part structure correctly.**")
+        st.error(f"🔴 FIREBASE INITIALIZATION FAILED. Root Cause: {e}. **Action: Ensure the Python code and the Streamlit Secrets are using the monolithic structure correctly.**")
         st.stop()
         
     finally:
@@ -125,6 +112,37 @@ try:
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
+
+
+# --- App State and Constants (Unchanged) ---
+REQUIRED_WORD_COUNT = 2000 
+LOAD_BATCH_SIZE = 10 
+QUIZ_SIZE = 5 
+AUTO_FETCH_THRESHOLD = 50 
+AUTO_FETCH_BATCH = 25 
+BRIEFING_BATCH_SIZE = 10 
+MANUAL_BRIEFING_BATCH = 50 
+
+# Admin Configuration (Mock Login)
+ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
+ADMIN_PASSWORD = "Jamshaid,1981" 
+MANUAL_EXTRACT_BATCH = 50 
+
+# Pydantic Schema for Vocabulary Word (Ensures data structure)
+class SatWord(BaseModel):
+    """Pydantic model for a vocabulary word, defining required structure."""
+    word: str = Field(description="The SAT-level word.")
+    pronunciation: str = Field(description="Simple, hyphenated phonetic pronunciation (e.g., eh-FEM-er-al).")
+    definition: str = Field(description="The concise dictionary definition.")
+    tip: str = Field(description="A short, catchy mnemonic memory tip.")
+    usage: str = Field(description="A professional sample usage sentence.")
+    sat_level: str = Field(default="High", description="Should always be 'High'.")
+    audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for word pronunciation.")
+    created_at: float = Field(default_factory=time.time)
+    
+    # PERMANENTLY STORED BRIEFING FIELDS (2-Minute Overview)
+    briefing_text: Optional[str] = Field(default=None, description="The extended AI-generated briefing text.")
+    briefing_audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for the briefing.")
 
 
 # ======================================================================

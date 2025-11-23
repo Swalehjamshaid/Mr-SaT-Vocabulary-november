@@ -8,7 +8,7 @@ import streamlit as st
 from pydantic import BaseModel, Field
 from pydantic import json_schema
 import tempfile 
-import re # <--- New import for regular expressions to clean the key
+import re 
 
 # --- EXTERNAL API IMPORTS ---
 try:
@@ -49,35 +49,36 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# --- FIREBASE INITIALIZATION: FINAL ROBUST METHOD ---
+# --- FIREBASE INITIALIZATION: FINAL JSON STRING METHOD ---
 temp_file_path = None
 try:
-    if "FIREBASE" not in st.secrets:
-        raise KeyError("FIREBASE")
+    # 1. Check for the single, monolithic secret key
+    if "FIREBASE_SERVICE_ACCOUNT" not in st.secrets:
+        raise KeyError("FIREBASE_SERVICE_ACCOUNT")
         
-    # 1. Get dictionary and make a mutable copy
-    service_account_info = dict(st.secrets["FIREBASE"])
+    # 2. Get the entire JSON string value
+    service_account_json_string = st.secrets["FIREBASE_SERVICE_ACCOUNT"]
     
-    # 2. Aggressive Private Key Cleaning
+    # 3. Parse the JSON string into a Python dictionary
+    service_account_info = json.loads(service_account_json_string)
+    
+    # 4. Aggressive Private Key Cleaning (Fix escaped newlines and invalid characters)
     private_key_content = service_account_info["private_key"]
     
-    # a) Fix escaped newlines (for certain environments)
+    # Fix escaped newlines: This explicitly converts JSON-escaped newlines ("\n")
+    # into actual newlines ("\n"), which is necessary for the PEM format.
     cleaned_key = private_key_content.replace("\\n", "\n")
     
-    # b) Use regex to remove any non-printable, illegal characters 
-    # that cause the InvalidData error, while preserving standard PEM format.
-    # This specifically targets hidden encoding issues.
-    # Note: We are now avoiding non-standard dash characters in the code itself.
+    # Use regex to remove any non-printable, illegal characters (our last persistent error)
     cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', cleaned_key)
-    
     service_account_info["private_key"] = cleaned_key
 
-    # 3. Write dictionary to a temporary JSON file path (secure method)
+    # 5. Write dictionary to a temporary JSON file path (secure method)
     with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json', encoding='utf-8') as f:
         json.dump(service_account_info, f)
         temp_file_path = f.name 
 
-    # 4. Initialize Firebase using the temp JSON file path
+    # 6. Initialize Firebase using the temp JSON file path
     if not firebase_admin._apps:
         cred = credentials.Certificate(temp_file_path)
         initialize_app(cred, name="vocab_builder_app") 
@@ -86,20 +87,23 @@ try:
     VOCAB_COLLECTION = db.collection("sat_vocabulary")
     
 except KeyError:
-    st.error("🔴 FIREBASE SETUP FAILED: The required secret **[FIREBASE]** table was not found in `secrets.toml`.")
+    st.error("🔴 FIREBASE SETUP FAILED: The required secret **FIREBASE_SERVICE_ACCOUNT** was not found. Please check your secrets name.")
+    st.stop()
+    
+except json.JSONDecodeError as e:
+    st.error(f"🔴 FIREBASE SETUP FAILED: The secret key format is invalid JSON. Error: {e}. Ensure the entire key is a single, valid JSON string.")
     st.stop()
     
 except Exception as e:
-    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. If the key is new, this is likely a hidden encoding/whitespace issue. Please check your **[FIREBASE]** secret for validity and permissions.")
+    st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. The key content may be invalid or corrupted.")
     st.stop()
     
 finally:
-    # 5. Cleanup: Delete the temporary file
+    # 7. Cleanup: Delete the temporary file
     if temp_file_path and os.path.exists(temp_file_path):
         try:
             os.remove(temp_file_path)
         except Exception as e:
-            # Non-critical failure: print, but don't stop the app
             print(f"Warning: Failed to clean up temp file at {temp_file_path}. Error: {e}")
 # --- END NEW FIREBASE BLOCK ---
 

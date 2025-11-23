@@ -76,7 +76,7 @@ try:
             break
             
     if not key_parts:
-         raise ValueError("Private key parts (private_key_partN) or 'private_key' not found in secret.")
+        raise ValueError("Private key parts (private_key_partN) or 'private_key' not found in secret.")
     
     # Reassemble the key with required newlines
     # Join parts with a newline, which is essential for PEM format

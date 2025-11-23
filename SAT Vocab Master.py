@@ -67,6 +67,7 @@ try:
     # b) Use regex to remove any non-printable, illegal characters 
     # that cause the InvalidData error, while preserving standard PEM format.
     # This specifically targets hidden encoding issues.
+    # Note: We are now avoiding non-standard dash characters in the code itself.
     cleaned_key = re.sub(r'[^\x20-\x7E\r\n\t]+', '', cleaned_key)
     
     service_account_info["private_key"] = cleaned_key
@@ -963,7 +964,9 @@ def two_minute_drill_ui():
             
         # Text Content 
         st.markdown("##### 🔊 Full Briefing Transcript")
-        st.markdown(briefing['text'])
+            # Scrub for any lingering illegal chars that might have survived the source file clean
+        clean_briefing_text = re.sub(r'[\u2013\u2014]', '-', briefing['text']) # replace common dashes with hyphen
+        st.markdown(clean_briefing_text)
         
         st.markdown("---")
         st.info(f"The briefing is about {len(briefing['text'].split())} words long.")
@@ -1138,63 +1141,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
-
-You are absolutely right to be frustrated—this has been a long and tricky chain of errors!
-
-The issue is that the error message is constantly changing, indicating that we are successfully fixing one layer of the problem only to hit the next, deeper issue with the certificate format.
-
-### 🛑 Current Error and Final Solution
-
-The image you provided shows the latest error, which is the most specific and is caused by the Python cryptographic library rejecting the key:
-
-> **Failed to initialize a certificate credential. Caused by: "Unable to load PEM file. See... InvalidData(Invalid Byte(64, 46))".**
-
-This means, despite the code's aggressive cleaning, there is still an illegal character or formatting issue in the **data of the private key** itself.
-
-**The issue is no longer the Python code, Streamlit, or the method of reading the secret; the issue is the content of the `private_key` value in your `.streamlit/secrets.toml` file.**
-
-Here is the **final, definitive action plan** to permanently fix the integration issue, focused entirely on the secret content:
-
-### **Action Plan: Re-Secure and Clean the Secret**
-
-1.  **Generate a Brand New Key (Crucial Step):** The key you are using may be permanently corrupted with invisible characters from previous copy-paste operations.
-    * Go to your Firebase Project settings > Service accounts.
-    * Click **Generate new private key** and download the new JSON file.
-
-2.  **Use a Simple Text Editor (Not MS Word or Rich Text):** Open the new JSON file in a clean editor like VS Code, Sublime Text, or Notepad++.
-
-3.  **Manual Cleaning and Formatting (MANDATORY):**
-
-    * **Find the `private_key` value** in the new JSON file. It will be one very long string with `\n` characters embedded.
-    * **Copy the entire key string**, including the surrounding quotes:
-        ```json
-        "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-        ```
-    * **Paste and Clean in `secrets.toml`:** Open your `.streamlit/secrets.toml` file. Paste the **raw key string** into the `private_key` field, ensuring it uses the triple quotes, and that **there are no extra spaces or line breaks outside the Base64 data lines.**
-
-    You must ensure your `.streamlit/secrets.toml` looks exactly like this. **Pay special attention to the `private_key` lines.**
-
-    ```toml
-    # .streamlit/secrets.toml
-
-    GEMINI_API_KEY = "AIzaSyC25goPg5imM6Whsac5fQAjl0Vts0h8FQE"
-
-    [FIREBASE]
-    type = "service_account"
-    # Use the new values from your freshly downloaded JSON file
-    project_id = "sat-app-560ef" 
-    private_key_id = "NEW_KEY_ID_FROM_DOWNLOADED_JSON" 
-    
-    # 🛑 CRITICAL: Paste the content exactly as copied from the JSON, 
-    # but ensure it's wrapped in triple quotes, not single-line JSON escaped.
-    private_key = """
-    -----BEGIN PRIVATE KEY-----
-    [PASTE NEW, RAW, MULTI-LINE BASE64 DATA HERE]
-    -----END PRIVATE KEY-----
-    """
-    
-    # Use the new values from your freshly downloaded JSON file
-    client_email = "firebase-adminsdk-fbsvc@sat-app-560ef.iam.gserviceaccount.com"
-    client_id = "NEW_CLIENT_ID"
-    # ... rest of the fields ...

@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 import streamlit as st
 from pydantic import BaseModel, Field
 from pydantic import json_schema
+import tempfile # <--- New import for temporary file handling
 
 # --- EXTERNAL API IMPORTS ---
 try:
@@ -36,32 +37,39 @@ except ImportError:
 # ======================================================================
 
 # Check for API Key (Gemini)
-# Using st.secrets notation for both keys for consistency
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("🔴 GEMINI_API_KEY is missing! Please set it in your Streamlit Secrets.")
     st.stop()
 
 # Initialize Gemini Client
 try:
-    # Read API key directly from st.secrets
     gemini_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
 except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# --- FIREBASE INITIALIZATION: NEW METHOD USING st.secrets TOML TABLE ---
+# --- FIREBASE INITIALIZATION: NEW FILE-BASED METHOD (Robust against newline errors) ---
+temp_file_path = None
 try:
     if "FIREBASE" not in st.secrets:
-        # Check for the correct TOML table name
         raise KeyError("FIREBASE")
         
-    # Streamlit automatically converts the [FIREBASE] TOML table into a Python dictionary
-    service_account_info = st.secrets["FIREBASE"]
+    # 1. Get dictionary and make a copy to modify
+    service_account_info = st.secrets["FIREBASE"].copy()
+    
+    # 2. Fix private key newlines: This explicitly converts escaped newlines
+    # (like "\\n" which Streamlit sometimes provides) into actual newlines ("\n")
+    service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
 
-    # Initialize the app only once
+    # 3. Write dictionary to a temporary JSON file. This is the most reliable way 
+    # to pass complex credentials to the Firebase Admin SDK on various platforms.
+    with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.json') as f:
+        json.dump(service_account_info, f)
+        temp_file_path = f.name # Store path for cleanup
+
+    # 4. Initialize Firebase using the temp JSON file path
     if not firebase_admin._apps:
-        # credentials.Certificate takes the Python dictionary directly
-        cred = credentials.Certificate(service_account_info)
+        cred = credentials.Certificate(temp_file_path)
         initialize_app(cred, name="vocab_builder_app") 
 
     db = firestore.client() 
@@ -72,9 +80,13 @@ except KeyError:
     st.stop()
     
 except Exception as e:
-    # This catches genuine initialization errors (like an invalid PEM key)
     st.error(f"🔴 FIREBASE INITIALIZATION FAILED: An unexpected initialization error occurred: {e}. Check your **[FIREBASE]** secret for validity and permissions.")
     st.stop()
+    
+finally:
+    # 5. Cleanup: Attempt to delete the temporary file after initialization
+    if temp_file_path and os.path.exists(temp_file_path):
+        os.remove(temp_file_path)
 # --- END NEW FIREBASE BLOCK ---
 
 

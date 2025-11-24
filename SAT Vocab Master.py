@@ -976,6 +976,72 @@ def dummy_warning_callback():
     st.session_state.autotask_status = 'Running'
     st.rerun()
 
+@st.cache_resource
+def get_admin_container():
+    """Creates and returns a single, persistent container for the Admin UI interactive elements."""
+    return st.empty()
+
+def render_admin_tools(container: st.delta_generator.DeltaGenerator):
+    """Renders all interactive admin elements into the given container."""
+    
+    # --- MANUAL WORD ENTRY (Synchronous) ---
+    container.subheader("Manual Word & All Content Entry")
+    with container.form(key="manual_word_form", clear_on_submit=False):
+        # This input uses a key that only exists when the task is NOT running
+        manual_word = container.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
+        manual_submit = container.form_submit_button("Generate ALL Content (Synchronous & Slow)")
+        if manual_submit: 
+            handle_manual_word_entry(manual_word)
+            return
+
+    container.markdown("---")
+    
+    # --- BULK AND REFRESH TOOLS (ISOLATED IN A NON-SUBMITTING FORM) ---
+    container.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
+    
+    if st.session_state.vocab_data:
+        missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
+        missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+    else: missing_audio_count = 0; missing_briefing_count = 0
+            
+    container.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
+    container.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
+    
+    # Encapsulate all action buttons in this separate non-submitting form
+    with container.form(key="bulk_actions_form", clear_on_submit=False):
+        col_audio_fix, col_briefing_gen = container.columns(2)
+        
+        with col_audio_fix:
+            container.form_submit_button("Attempt Bulk Audio Fix", type="primary", on_click=handle_bulk_audio_fix)
+        with col_briefing_gen:
+            container.form_submit_button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
+
+        container.markdown("---")
+        container.subheader("Vocabulary Extraction (Bulk - Background Task)")
+        container.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+        
+        container.form_submit_button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_form", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+
+        container.markdown("---")
+    
+    container.subheader("Manual Data Refresh (Cache Bust)")
+    container.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
+
+def render_admin_status(container: st.delta_generator.DeltaGenerator):
+    """Renders the disabled status message into the given container."""
+    container.info("🛑 **A Background Task is Running!** Data manipulation buttons are currently inactive. Check the **Application Status Board** for progress.")
+    container.markdown("---")
+    container.subheader("Manual Word & All Content Entry")
+    container.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_disp", disabled=True)
+    container.button("Generate ALL Content (Synchronous & Slow)", disabled=True)
+    container.markdown("---")
+    container.subheader("Bulk Operations Inactive")
+    container.info("Wait for background process to finish before using Bulk Tools.")
+    container.markdown("---")
+    container.subheader("Manual Data Refresh (Cache Bust)")
+    container.button("Force Reload Data from DB", key="btn_force_reload_disp", type="danger", disabled=True)
+
+
 def admin_extraction_ui():
     """Renders the Admin Extraction and User Management feature."""
     st.header("💡 Data Tools", divider="orange") 
@@ -986,73 +1052,15 @@ def admin_extraction_ui():
     
     is_task_running = st.session_state.autotask_running
     
-    # Placeholder for the interactive form/buttons
-    interactive_container = st.empty()
+    # Get the single, persistent container
+    interactive_container = get_admin_container()
     
+    # Strict rendering control: Render the *entire* interactive component tree 
+    # only if the task is NOT running. Otherwise, render the status tree.
     if is_task_running:
-        # Show only status/disabled components in the placeholder if a task is running
-        with interactive_container.container():
-             st.info("🛑 **A Background Task is Running!** Data manipulation buttons are currently inactive. Check the **Application Status Board** for progress.")
-             st.markdown("---")
-             st.subheader("Manual Word & All Content Entry")
-             st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_disp", disabled=True)
-             st.button("Generate ALL Content (Synchronous & Slow)", disabled=True)
-             st.markdown("---")
-             st.subheader("Bulk Operations Inactive")
-             st.info("Wait for background process to finish before using Bulk Tools.")
-             st.markdown("---")
-             st.subheader("Manual Data Refresh (Cache Bust)")
-             st.button("Force Reload Data from DB", key="btn_force_reload_disp", type="danger", disabled=True)
+        render_admin_status(interactive_container)
     else:
-        # If no task is running, render the full interactive UI in the placeholder
-        with interactive_container.container():
-            
-            # --- MANUAL WORD ENTRY (Synchronous) ---
-            st.subheader("Manual Word & All Content Entry")
-            with st.form(key="manual_word_form", clear_on_submit=False):
-                # This input uses a key that only exists when the task is NOT running
-                manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
-                manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
-                if manual_submit: 
-                    handle_manual_word_entry(manual_word)
-                    return
-
-            st.markdown("---")
-            
-            # --- BULK AND REFRESH TOOLS (ISOLATED IN A NON-SUBMITTING FORM) ---
-            st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
-            
-            if st.session_state.vocab_data:
-                missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-                missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
-            else: missing_audio_count = 0; missing_briefing_count = 0
-                    
-            st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
-            st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
-            
-            # Encapsulate all action buttons in this separate non-submitting form
-            with st.form(key="bulk_actions_form", clear_on_submit=False):
-                col_audio_fix, col_briefing_gen = st.columns(2)
-                
-                with col_audio_fix:
-                    st.form_submit_button("Attempt Bulk Audio Fix", type="primary", on_click=handle_bulk_audio_fix)
-                with col_briefing_gen:
-                    st.form_submit_button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
-
-                st.markdown("---")
-                st.subheader("Vocabulary Extraction (Bulk - Background Task)")
-                st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
-                
-                st.form_submit_button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_form", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
-
-                st.markdown("---")
-            
-            # CRITICAL FIX: The previously crashing button is moved *outside* the internal form 
-            # and is rendered as a clean st.button. The state guard in main() should have stabilized this.
-            st.subheader("Manual Data Refresh (Cache Bust)")
-            st.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
-    
-    # We remove the is_running_ui_draw flags entirely since the strict initialization guard handles the race condition.
+        render_admin_tools(interactive_container)
 
 
 # ======================================================================
@@ -1097,9 +1105,8 @@ def main():
             with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
                 load_and_update_vocabulary_data()
             
-            # CRITICAL FIX: If this is the *first* run after login, flag it and RERUN immediately.
-            # This ensures the UI gets a chance to stabilize (drawing all widgets) before auto-tasks fire 
-            # and prevents the race condition crash.
+            # CRITICAL: If this is the *first* run after login, flag it and RERUN immediately.
+            # This ensures the UI draws once cleanly before auto-tasks fire.
             if not st.session_state.initial_auth_rerun_done:
                  st.session_state.initial_auth_rerun_done = True
                  st.rerun()

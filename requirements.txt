@@ -5,3 +5,4 @@ gtts
 google-genai
 pydantic
 typing
+sqlalchemy

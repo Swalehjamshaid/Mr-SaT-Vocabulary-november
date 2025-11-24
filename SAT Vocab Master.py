@@ -164,6 +164,7 @@ def fetch_vocabulary_batch(offset: int) -> List[Dict]:
 
 def load_and_update_vocabulary_data():
     """Loads the INITIAL batch of data and calculates the total count."""
+    # We only load data if authenticated AND if data is not already loaded
     if not st.session_state.is_auth or st.session_state.vocab_data is not None: return
 
     st.session_state.total_word_count = get_total_word_count()
@@ -177,10 +178,11 @@ def load_and_update_vocabulary_data():
     else:
         st.session_state.has_more_data = False
     
-    if len(vocab_list) > 0:
-        st.info(f"✅ Loaded initial {len(vocab_list)} words from DB (Total: {st.session_state.total_word_count}).")
-    elif st.session_state.is_auth:
-        st.info(f"Database is empty. Total count: {st.session_state.total_word_count}.")
+    # Do not show this info message in the UI since the Data Board now handles status
+    # if len(vocab_list) > 0:
+    #     st.info(f"✅ Loaded initial {len(vocab_list)} words from DB (Total: {st.session_state.total_word_count}).")
+    # elif st.session_state.is_auth:
+    #     st.info(f"Database is empty. Total count: {st.session_state.total_word_count}.")
 
 
 def fetch_and_append_next_batch():
@@ -605,13 +607,13 @@ def handle_auth(email: str, password: str):
     st.session_state.drill_word_index = 0 
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
     
+    # We delay loading data until the main block to trigger auto-fetch logic
     st.session_state.vocab_data = None
     st.session_state.has_more_data = True
     st.session_state.total_word_count = 0
 
-    with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
-        load_and_update_vocabulary_data() 
-        
+    # Removed the initial loading spinner here. Loading will happen in the main function.
+    
     st.rerun()
     
 def handle_logout():
@@ -634,11 +636,15 @@ def data_board_ui():
     """Displays key metrics and the status of background tasks."""
     
     if not st.session_state.is_auth or st.session_state.vocab_data is None:
-        return
+        # If not loaded yet, show basic status based on total count
+        word_count = st.session_state.total_word_count
+    else:
+        word_count = st.session_state.total_word_count
     
-    word_count = st.session_state.total_word_count
-    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
-    
+    # Calculate missing briefings only if data is loaded
+    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')]) if st.session_state.vocab_data else 0
+    loaded_count = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
+
     st.header("📊 Application Status Board")
     
     cols = st.columns(4)
@@ -646,7 +652,7 @@ def data_board_ui():
     with cols[0]:
         st.metric(label="Total Words (DB)", value=word_count, delta=f"Target: {REQUIRED_WORD_COUNT}")
     with cols[1]:
-        st.metric(label="Words Loaded (RAM)", value=len(st.session_state.vocab_data)) 
+        st.metric(label="Words Loaded (RAM)", value=loaded_count) 
     with cols[2]:
         st.metric(label="Words Missing Briefing", value=missing_briefing_count)
     with cols[3]:
@@ -669,7 +675,7 @@ def display_vocabulary_ui():
     st.header("📚 Vocabulary Display", divider="blue")
     
     if st.session_state.vocab_data is None or not st.session_state.vocab_data:
-        st.info("No vocabulary loaded yet. Please use the **Data Tools** tab to generate the first batch of words.")
+        st.info("The vocabulary list is empty. Please use the **Data Tools** tab to generate the first batch of words.")
         return
 
     total_loaded_words = len(st.session_state.vocab_data)
@@ -1016,25 +1022,27 @@ def main():
             st.success(f"Logged in as: **{display_name}**")
             if st.button("Log Out", on_click=handle_logout): pass
                 
-    if st.session_state.is_auth and st.session_state.vocab_data is None:
-        load_and_update_vocabulary_data() 
-        st.rerun() 
-    
-    if not st.session_state.is_auth:
-        st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
-    else:
-        # AUTOMATIC DATA FETCHING/FIXING LOGIC (Admin Only)
-        # 1. Checks if total word count is low (below 50) AND no task is running
+    # --- Data Loading and Auto-Fetch Logic ---
+    if st.session_state.is_auth:
+        
+        # 1. Try to load initial data if it hasn't been loaded yet (vocab_data is None)
+        if st.session_state.vocab_data is None:
+            with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
+                load_and_update_vocabulary_data()
+        
+        # 2. AUTOMATIC DATA FETCHING/FIXING LOGIC (Admin Only, runs after load)
         if st.session_state.is_admin and st.session_state.initial_load_done and not st.session_state.autotask_running:
             
             # If database is nearly empty, automatically start bulk extraction of 25 words
             if st.session_state.total_word_count < AUTO_FETCH_THRESHOLD:
-                 handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
+                # Trigger auto-fetch immediately upon loading empty data
+                handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
             
             # If database is populated, check for and generate missing briefings
             else:
                 auto_generate_briefings() 
 
+        # --- Display Core UI (Always visible after login) ---
         data_board_ui()
 
         tab_display, tab_quiz, tab_drill, tab_admin = st.tabs([
@@ -1048,6 +1056,9 @@ def main():
         with tab_quiz: generate_quiz_ui()
         with tab_drill: two_minute_drill_ui()
         with tab_admin: admin_extraction_ui()
+
+    else:
+        st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
 
 if __name__ == "__main__":
     main()

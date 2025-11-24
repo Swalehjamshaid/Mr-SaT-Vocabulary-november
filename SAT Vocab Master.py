@@ -177,6 +177,7 @@ def initialize_session_state():
 def get_total_word_count() -> int:
     """Fetches the total document count using SQL."""
     try:
+        # Use ttl=0 to always fetch the latest count from the DB and bypass cache
         result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME};", ttl=0)
         return int(result.iloc[0, 0])
     except Exception:
@@ -194,7 +195,8 @@ def fetch_vocabulary_batch(offset: int, limit: int) -> List[Dict]:
             LIMIT {limit}
             OFFSET {offset};
         """
-        df = db_conn.query(sql_query, ttl=600)
+        # Use a short TTL (e.g., 60s) for batch fetches, but ensure 0 for critical count checks
+        df = db_conn.query(sql_query, ttl=60) 
         
         return df.to_dict('records')
     except Exception as e:
@@ -238,7 +240,7 @@ def fetch_and_append_next_batch():
     if next_batch:
         st.session_state.vocab_data.extend(next_batch)
         
-        # FIX: Ensure total_word_count is updated, though it should be current from initial load/writes
+        # FIX: Ensure total_word_count is updated after fetch
         st.session_state.total_word_count = get_total_word_count()
         
         # Check against the total DB count, not just the batch size
@@ -404,7 +406,7 @@ def generate_full_briefing_content(word_data: Dict) -> Optional[Dict]:
 def get_all_existing_words_from_db() -> List[str]:
     """Fetches all words currently saved in the DB for the exclusion list."""
     try:
-        # Fetch only the 'word' column, which is fast
+        # Fetch only the 'word' column, which is fast and uncached (ttl=0)
         df = db_conn.query(f"SELECT word FROM {TABLE_NAME};", ttl=0)
         return df['word'].tolist()
     except Exception as e:
@@ -430,7 +432,6 @@ def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
     
     try:
         # MODIFICATION: Use the most accurate word list from DB right before API call
-        # This addresses the data lag issue that causes the duplicate errors.
         current_existing_words = get_all_existing_words_from_db()
         
         with st.spinner(f"Step 1/3: Requesting {num_words} words from Gemini..."):
@@ -532,6 +533,7 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
 def get_words_missing_briefing_count() -> int:
     """Fetches the count of words that do not have briefing audio data."""
     try:
+        # Use ttl=0 to always fetch the latest count from the DB and bypass cache
         result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NULL;", ttl=0)
         return int(result.iloc[0, 0])
     except Exception:
@@ -572,6 +574,7 @@ def run_auto_maintenance_sync():
         st.session_state.auto_fetch_triggered = True # Mark as complete
 
     # CRITICAL FIX: RERUN if a task was just executed successfully to immediately start the next maintenance check.
+    # We check for the starting "✅" which is set on successful batch completion.
     if task_ran and st.session_state.autotask_message.startswith("✅"):
         st.rerun()
 

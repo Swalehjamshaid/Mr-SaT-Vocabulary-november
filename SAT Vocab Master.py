@@ -89,7 +89,8 @@ def create_table_if_not_exists(conn):
             # FIX: Use text() to explicitly declare the multiline SQL as a raw SQL string for stability
             s.execute(text(sql_create))
             s.commit()
-        st.success(f"✅ Table '{TABLE_NAME}' structure verified/created with wide columns.")
+        # MODIFICATION: Changed st.success to print() so it does not display on the slide/UI.
+        print(f"✅ Table '{TABLE_NAME}' structure verified/created with wide columns.")
     except Exception as e:
         st.error(f"🔴 FAILED to create or verify table structure: {e}")
         st.stop()
@@ -107,6 +108,9 @@ def initialize_db_connection():
         
         # 2. Test query (optional check)
         conn.query(f"SELECT 'success' FROM {TABLE_NAME} LIMIT 1;", ttl=0)
+        
+        # Display the main connection confirmation message *only* once, outside of the table creation function
+        st.success("✅ Database connection (Neon/PostgreSQL) initialized and ready.")
         
         return conn
     

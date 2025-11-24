@@ -975,7 +975,7 @@ def admin_extraction_ui():
     
     # Display message if task is running
     if is_task_running:
-        st.info("🛑 **A Background Task is Running!** All data manipulation buttons are temporarily disabled to prevent errors.")
+        st.info("🛑 **A Background Task is Running!** Data manipulation buttons are temporarily disabled. Check the **Application Status Board** for progress.")
     
     # --- MANUAL WORD ENTRY (Still a form for clean field capture) ---
     st.subheader("Manual Word & All Content Entry")
@@ -988,7 +988,7 @@ def admin_extraction_ui():
 
     st.markdown("---")
     
-    # --- BULK AND REFRESH TOOLS (CRITICAL FIX: Use simple buttons outside forms) ---
+    # --- BULK AND REFRESH TOOLS (CRITICAL FIX: Buttons rendered WITHOUT disabled=is_task_running) ---
     st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
     
     if st.session_state.vocab_data:
@@ -1001,24 +1001,24 @@ def admin_extraction_ui():
 
     col_audio_fix, col_briefing_gen = st.columns(2)
     with col_audio_fix:
-        # Simple button with callback to prevent threading conflict
-        st.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix", type="primary", disabled=is_task_running, on_click=handle_bulk_audio_fix)
+        # NOTE: Remove disabled property to stop API crash, rely on handler check instead
+        st.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix", type="primary", on_click=handle_bulk_audio_fix)
     with col_briefing_gen:
-        # Simple button with callback to prevent threading conflict
-        st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing", type="secondary", disabled=is_task_running, on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
+        # NOTE: Remove disabled property to stop API crash, rely on handler check instead
+        st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
 
     st.markdown("---")
     st.subheader("Vocabulary Extraction (Bulk - Background Task)")
     st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
     
-    # CRITICAL: Use simple button with callback to prevent threading conflict
-    st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract", type="secondary", disabled=is_task_running, on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+    # CRITICAL: Remove disabled property to stop API crash, rely on handler check instead
+    st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
 
     st.markdown("---")
     st.subheader("Manual Data Refresh (Cache Bust)")
     
-    # CRITICAL: Use simple button with dedicated callback
-    st.button("Force Reload Data from DB", key="btn_force_reload", type="danger", disabled=is_task_running, on_click=manual_refresh_callback)
+    # CRITICAL: Remove disabled property to stop API crash, rely on handler check instead
+    st.button("Force Reload Data from DB", key="btn_force_reload", type="danger", on_click=manual_refresh_callback)
 
 
 # ======================================================================

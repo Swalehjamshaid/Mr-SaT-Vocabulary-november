@@ -317,7 +317,6 @@ class LongRunningTaskController:
             st.session_state.task_thread = None
 
     def _update_session_state(self, status: str, message: str, running: bool):
-        # We rely only on the `initial_auth_rerun_done` guard and the UI structure now.
         st.session_state.autotask_status = status
         st.session_state.autotask_message = message
         st.session_state.autotask_running = running
@@ -644,7 +643,6 @@ def handle_logout():
     
 def manual_refresh_callback():
     """Callback function for the Force Reload Data button."""
-    # This handler is now tied to a button outside the problematic form
     if st.session_state.autotask_running:
         st.warning("Cannot refresh data while a background task is running.")
         return
@@ -982,21 +980,26 @@ def get_admin_container():
     return st.empty()
 
 def render_admin_tools(container: st.delta_generator.DeltaGenerator):
-    """Renders all interactive admin elements into the given container."""
+    """
+    Renders all interactive admin elements into the given container using simplified 
+    st.button and a single form for the background tasks to avoid structural errors.
+    """
     
-    # --- MANUAL WORD ENTRY (Synchronous) ---
+    # --- MANUAL WORD ENTRY (Synchronous, simplified to use st.button) ---
     container.subheader("Manual Word & All Content Entry")
-    with container.form(key="manual_word_form", clear_on_submit=False):
-        # This input uses a key that only exists when the task is NOT running
-        manual_word = container.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
-        manual_submit = container.form_submit_button("Generate ALL Content (Synchronous & Slow)")
+    
+    # Use st.form only for the input to ensure clean state submission if needed, 
+    # but handle the click logic outside for maximum stability.
+    with container.form(key="manual_word_input_form", clear_on_submit=True):
+        manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
+        manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
         if manual_submit: 
             handle_manual_word_entry(manual_word)
             return
 
     container.markdown("---")
     
-    # --- BULK AND REFRESH TOOLS (ISOLATED IN A NON-SUBMITTING FORM) ---
+    # --- BULK AND REFRESH TOOLS (Using simplified st.button calls) ---
     container.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
     
     if st.session_state.vocab_data:
@@ -1007,24 +1010,26 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     container.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
     container.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
     
-    # Encapsulate all action buttons in this separate non-submitting form
-    with container.form(key="bulk_actions_form", clear_on_submit=False):
-        col_audio_fix, col_briefing_gen = container.columns(2)
-        
-        with col_audio_fix:
-            container.form_submit_button("Attempt Bulk Audio Fix", type="primary", on_click=handle_bulk_audio_fix)
-        with col_briefing_gen:
-            container.form_submit_button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
+    col_audio_fix, col_briefing_gen = container.columns(2)
+    
+    with col_audio_fix:
+        # Use simple button for immediate handler call
+        container.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix_simple", type="primary", on_click=handle_bulk_audio_fix)
+    with col_briefing_gen:
+        # Use simple button for immediate handler call
+        container.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing_simple", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
 
-        container.markdown("---")
-        container.subheader("Vocabulary Extraction (Bulk - Background Task)")
-        container.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
-        
-        container.form_submit_button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_form", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+    container.markdown("---")
+    container.subheader("Vocabulary Extraction (Bulk - Background Task)")
+    container.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+    
+    # Use simple button for immediate handler call
+    container.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_simple", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
 
-        container.markdown("---")
+    container.markdown("---")
     
     container.subheader("Manual Data Refresh (Cache Bust)")
+    # This button is the crash site. Using the cached container's button method here, isolated.
     container.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
 
 def render_admin_status(container: st.delta_generator.DeltaGenerator):
@@ -1060,6 +1065,8 @@ def admin_extraction_ui():
     if is_task_running:
         render_admin_status(interactive_container)
     else:
+        # Clear the container before drawing to ensure no stale disabled widgets remain
+        interactive_container.empty() 
         render_admin_tools(interactive_container)
 
 

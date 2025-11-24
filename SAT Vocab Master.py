@@ -453,7 +453,12 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
 
 def handle_manual_word_entry(word: str):
     """Generates all content for a single word and saves it to the database."""
-    if not word or st.session_state.autotask_running: st.error("Please enter a word or wait for the current task to finish."); return
+    if st.session_state.autotask_running:
+        st.error("A background task is running. Please wait.")
+        return
+    if not word: 
+        st.error("Please enter a word."); 
+        return
         
     st.info(f"Generating content for '{word}'...")
     
@@ -532,6 +537,9 @@ def auto_generate_briefings_manual(batch_size: int):
 
 def handle_fix_single_audio(word_index: int):
     """Generates missing pronunciation audio for a single word and updates the DB document."""
+    if st.session_state.autotask_running:
+        st.error("A background task is running. Please wait.")
+        return
     if word_index < 0 or word_index >= len(st.session_state.vocab_data):
         st.error("Invalid word index."); return
         
@@ -554,6 +562,10 @@ def handle_fix_single_audio(word_index: int):
 
 def handle_bulk_audio_fix():
     """Attempts to generate and save missing pronunciation audio for all corrupted words."""
+    if st.session_state.autotask_running:
+        st.error("A background task is running. Please wait.")
+        return
+        
     words_to_fix_indices = [i for i, d in enumerate(st.session_state.vocab_data) if d.get('audio_base64') is None]
     
     if not words_to_fix_indices: st.success("All loaded words already have pronunciation audio!"); return
@@ -628,6 +640,7 @@ def handle_logout():
 def manual_refresh_callback():
     """Callback function for the Force Reload Data button."""
     if st.session_state.autotask_running:
+        # Crucial check inside handler to block execution if thread is running
         st.warning("Cannot refresh data while a background task is running.")
         return
     st.session_state.vocab_data = None 
@@ -730,8 +743,7 @@ def display_vocabulary_ui():
                             key=f"fix_audio_{start_index + i}", 
                             on_click=handle_fix_single_audio, 
                             args=(start_index + i,),
-                            type="primary",
-                            disabled=st.session_state.autotask_running
+                            type="primary"
                         )
 
                 st.markdown(f"**📖 Definition:** {definition.capitalize()}") 
@@ -745,7 +757,7 @@ def display_vocabulary_ui():
     
     with col_prev:
         if st.session_state.current_page_index > 0:
-            st.button("⬅️ Previous 10 Words", on_click=go_to_prev_page, disabled=st.session_state.autotask_running)
+            st.button("⬅️ Previous 10 Words", on_click=go_to_prev_page)
     
     with col_status:
         current_page = st.session_state.current_page_index + 1
@@ -760,7 +772,7 @@ def display_vocabulary_ui():
             button_label = "Fetch Next Batch ➡️"
             
         if can_go_next:
-            st.button(button_label, on_click=go_to_next_page, type="secondary", disabled=st.session_state.autotask_running)
+            st.button(button_label, on_click=go_to_next_page, type="secondary")
 
 def generate_quiz_ui():
     """Renders the Quiz Section feature."""
@@ -923,7 +935,7 @@ def two_minute_drill_ui():
     if not briefing_exists_in_db and st.session_state.is_admin:
         st.warning(f"Briefing content missing for {selected_word_str}. Generate it now!")
         # Use standard button outside of complex form to prevent conflict
-        if st.button(f"Generate and Save Briefing for {selected_word_str}", type="primary", key="manual_drill_gen", disabled=st.session_state.autotask_running):
+        if st.button(f"Generate and Save Briefing for {selected_word_str}", type="primary", key="manual_drill_gen"):
             auto_generate_briefings_manual(1); st.rerun() 
     
     if briefing:
@@ -990,23 +1002,23 @@ def admin_extraction_ui():
     col_audio_fix, col_briefing_gen = st.columns(2)
     with col_audio_fix:
         # Simple button with callback to prevent threading conflict
-        st.button("Attempt Bulk Audio Fix", type="primary", disabled=is_task_running, on_click=handle_bulk_audio_fix)
+        st.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix", type="primary", disabled=is_task_running, on_click=handle_bulk_audio_fix)
     with col_briefing_gen:
         # Simple button with callback to prevent threading conflict
-        st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", disabled=is_task_running, on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
+        st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing", type="secondary", disabled=is_task_running, on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
 
     st.markdown("---")
     st.subheader("Vocabulary Extraction (Bulk - Background Task)")
     st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
     
     # CRITICAL: Use simple button with callback to prevent threading conflict
-    st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", type="secondary", disabled=is_task_running, on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+    st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract", type="secondary", disabled=is_task_running, on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
 
     st.markdown("---")
     st.subheader("Manual Data Refresh (Cache Bust)")
     
     # CRITICAL: Use simple button with dedicated callback
-    st.button("Force Reload Data from DB", type="danger", disabled=is_task_running, on_click=manual_refresh_callback)
+    st.button("Force Reload Data from DB", key="btn_force_reload", type="danger", disabled=is_task_running, on_click=manual_refresh_callback)
 
 
 # ======================================================================

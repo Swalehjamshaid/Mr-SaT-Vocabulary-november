@@ -981,13 +981,11 @@ def admin_extraction_ui():
     
     is_task_running = st.session_state.autotask_running
     
-    # --- CRITICAL FIX: Conditional Rendering using st.empty() to control visibility ---
-    
     # Placeholder for the interactive form/buttons
     interactive_container = st.empty()
     
     if is_task_running:
-        # 1. Show only status/disabled components in the placeholder if a task is running
+        # Show only status/disabled components in the placeholder if a task is running
         with interactive_container.container():
              st.info("🛑 **A Background Task is Running!** Data manipulation buttons are currently inactive. Check the **Application Status Board** for progress.")
              st.markdown("---")
@@ -1002,7 +1000,7 @@ def admin_extraction_ui():
              st.button("Force Reload Data from DB", key="btn_force_reload_disp", type="danger", disabled=True)
         return
         
-    # 2. If no task is running, render the full interactive UI in the placeholder
+    # If no task is running, render the full interactive UI in the placeholder
     with interactive_container.container():
         
         # --- MANUAL WORD ENTRY (Synchronous) ---
@@ -1017,7 +1015,7 @@ def admin_extraction_ui():
 
         st.markdown("---")
         
-        # --- BULK AND REFRESH TOOLS ---
+        # --- BULK AND REFRESH TOOLS (ISOLATED IN A NON-SUBMITTING FORM) ---
         st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
         
         if st.session_state.vocab_data:
@@ -1027,24 +1025,27 @@ def admin_extraction_ui():
                 
         st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
         st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
-
-        col_audio_fix, col_briefing_gen = st.columns(2)
-        with col_audio_fix:
-            st.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix", type="primary", on_click=handle_bulk_audio_fix)
-        with col_briefing_gen:
-            st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
-
-        st.markdown("---")
-        st.subheader("Vocabulary Extraction (Bulk - Background Task)")
-        st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
         
-        st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+        # Encapsulate all action buttons in this separate non-submitting form
+        with st.form(key="bulk_actions_form", clear_on_submit=False):
+            col_audio_fix, col_briefing_gen = st.columns(2)
+            
+            with col_audio_fix:
+                st.form_submit_button("Attempt Bulk Audio Fix", type="primary", on_click=handle_bulk_audio_fix)
+            with col_briefing_gen:
+                st.form_submit_button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
 
-        st.markdown("---")
-        st.subheader("Manual Data Refresh (Cache Bust)")
-        
-        # The specific button causing the error is now rendered only when is_task_running is False
-        st.button("Force Reload Data from DB", key="btn_force_reload", type="danger", on_click=manual_refresh_callback)
+            st.markdown("---")
+            st.subheader("Vocabulary Extraction (Bulk - Background Task)")
+            st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+            
+            st.form_submit_button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_form", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+
+            st.markdown("---")
+            st.subheader("Manual Data Refresh (Cache Bust)")
+            
+            # This button, which caused the crash, is now inside a clean st.form block
+            st.form_submit_button("Force Reload Data from DB", key="btn_force_reload_form", type="danger", on_click=manual_refresh_callback)
 
 
 # ======================================================================

@@ -7,16 +7,13 @@ import re
 import io
 import tempfile
 from typing import List, Dict, Optional, Any
-# Removed threading and concurrent.futures imports
 
 import streamlit as st
 from pydantic import BaseModel, Field
-import pandas as pd # Required for reading SQL results
-import sqlalchemy # Required by st.connection('sql')
-# Import specific error type from SQLAlchemy
+import pandas as pd
+import sqlalchemy
 from sqlalchemy.exc import IntegrityError, ProgrammingError, OperationalError
-# Import text() for raw SQL execution
-from sqlalchemy import text 
+from sqlalchemy import text # Critical import for stable raw SQL execution
 
 # --- EXTERNAL API IMPORTS ---
 try:
@@ -42,13 +39,13 @@ TABLE_NAME: str = "sat_vocabulary"
 
 # --- App State and Constants ---
 REQUIRED_WORD_COUNT = 2000 
-LOAD_BATCH_SIZE = 10         # Fetch and display 10 words at a time
+LOAD_BATCH_SIZE = 10
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
-AUTO_FETCH_BATCH = 25        # Words to fetch in background auto-task
+AUTO_FETCH_BATCH = 25
 BRIEFING_BATCH_SIZE = 10 
 MANUAL_BRIEFING_BATCH = 50 
-MANUAL_EXTRACT_BATCH = 50    # Words to fetch in foreground manual task
+MANUAL_EXTRACT_BATCH = 50
 
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
@@ -89,7 +86,7 @@ def create_table_if_not_exists(conn):
     """
     try:
         with conn.session as s:
-            # FIX: Use text() to explicitly declare the multiline SQL as a raw SQL string
+            # FIX: Use text() to explicitly declare the multiline SQL as a raw SQL string for stability
             s.execute(text(sql_create))
             s.commit()
         st.success(f"✅ Table '{TABLE_NAME}' structure verified/created with wide columns.")
@@ -109,7 +106,6 @@ def initialize_db_connection():
         create_table_if_not_exists(conn)
         
         # 2. Test query (optional check)
-        # Note: We don't wrap simple query() calls in text()
         conn.query(f"SELECT 'success' FROM {TABLE_NAME} LIMIT 1;", ttl=0)
         
         return conn
@@ -264,7 +260,7 @@ def save_word_to_db(word_data: Dict) -> bool:
             VALUES ({values_placeholders});
         """
         with db_conn.session as s:
-            # FIX: Use text() for INSERT to ensure stability
+            # FIX: Use text() for INSERT for stability
             s.execute(text(sql_insert), params=word_data)
             s.commit()
         return True
@@ -298,7 +294,7 @@ def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
                 SET {', '.join(set_clauses)}
                 WHERE word = :word_name;
             """
-            # FIX: Use text() for UPDATE to ensure stability
+            # FIX: Use text() for UPDATE for stability
             s.execute(text(sql_update), params=params)
             s.commit()
         return True
@@ -364,12 +360,8 @@ def generate_full_briefing_content(word_data: Dict) -> Optional[Dict]:
 
 
 # ======================================================================
-# 4. ASYNCHRONOUS TASK CONTROLLER (REMOVED: Now Synchronous)
+# 4. SYNCHRONOUS TASK CONTROLLER
 # ======================================================================
-
-# The LongRunningTaskController class has been entirely removed to eliminate the 
-# threading conflict that caused the StreamlitAPIException.
-# All tasks are now executed synchronously (blocking the UI).
 
 def _enrich_word_sync(word_data: Dict) -> Dict:
     """Helper to generate audio and briefing content for a single word (Synchronous)."""
@@ -416,6 +408,8 @@ def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
             for word_data in enriched_words:
                 if save_word_to_db(word_data):
                     successful_saves += 1
+                # If save_word_to_db returns False (due to Integrity/Schema error), 
+                # we skip and continue the loop, preventing the full batch failure.
         
         st.session_state.autotask_message = f"✅ Success! Extracted and saved {successful_saves} words."
         st.session_state.vocab_data = None # Force full data reload
@@ -471,7 +465,6 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
 
 def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
     """Triggers the bulk word extraction (Synchronous)."""
-    # Auto-fetch logic will now run synchronously if needed
     
     # Pass existing words to LLM to avoid generating duplicates
     existing_words = [d['word'] for d in st.session_state.vocab_data if st.session_state.vocab_data]
@@ -526,12 +519,8 @@ def auto_generate_briefings_manual(batch_size: int):
     
     _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=batch_size)
 
-# The auto_generate_briefings function is now removed, as all auto-tasks should be 
-# handled by the synchronous manual handler via the main loop check.
-
 def handle_fix_single_audio(word_index: int):
     """Generates missing pronunciation audio for a single word and updates the DB document (Synchronous)."""
-    # This handler can remain mostly the same, as it was already synchronous
 
     if word_index < 0 or word_index >= len(st.session_state.vocab_data):
         st.error("Invalid word index."); return
@@ -633,7 +622,6 @@ def handle_logout():
     
 def manual_refresh_callback():
     """Callback function for the Force Reload Data button (SIMPLIFIED)."""
-    # Since we are synchronous, we don't need the autotask_running check here.
     st.session_state.vocab_data = None 
     st.session_state.total_word_count = 0
     st.info("Initiating manual data refresh...")
@@ -680,7 +668,6 @@ def data_board_ui():
     st.markdown("---")
 
 def display_vocabulary_ui():
-    # ... (unchanged)
     """Renders the Vocabulary Display feature with Paging functionality based on loaded data."""
     st.header("📚 Vocabulary Display", divider="blue")
     
@@ -768,7 +755,6 @@ def display_vocabulary_ui():
             st.button(button_label, on_click=go_to_next_page, type="secondary")
 
 def generate_quiz_ui():
-    # ... (unchanged)
     """Renders the Quiz Section feature."""
     st.header("📝 Vocabulary Quiz", divider="green")
     
@@ -886,7 +872,6 @@ def generate_quiz_ui():
             st.rerun()
 
 def two_minute_drill_ui():
-    # ... (unchanged)
     """Renders the UI for the 2-Minute Word Briefing feature."""
     st.header("⏱️ 2-Minute Drill", divider="red")
 
@@ -1006,7 +991,6 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     container.markdown("---")
     
     container.subheader("Manual Data Refresh (Cache Bust)")
-    # This button, now in a synchronous context, is no longer prone to thread races.
     container.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
 
 
@@ -1028,8 +1012,6 @@ def admin_extraction_ui():
         st.warning("You must be logged in as the Admin to use this tool.")
         return
     
-    # In the synchronous model, we always render the tools directly.
-    # The 'running' check is handled by the synchronous handler locking the UI.
     primary_container = st.container() 
     render_admin_tools(primary_container)
 
@@ -1045,9 +1027,6 @@ def main():
     
     initialize_session_state()
     
-    # REMOVED: task_controller.check_task_status()
-    # No more background threads to check
-
     with st.sidebar:
         st.header("User Login")
         if not st.session_state.is_auth:
@@ -1080,7 +1059,6 @@ def main():
                  st.rerun() # Ensure UI updates with loaded count
 
         # 2. AUTOMATIC DATA FETCHING/FIXING LOGIC (Synchronous check on rerun)
-        # This will run the task synchronously and block the UI until completion if needed.
         if st.session_state.is_admin and st.session_state.initial_load_done and st.session_state.initial_auth_rerun_done and not st.session_state.auto_fetch_triggered:
             
             # If database is nearly empty, automatically start bulk extraction of 25 words
@@ -1089,11 +1067,9 @@ def main():
                 
                 # EXECUTE SYNCHRONOUSLY, blocking the UI
                 handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
-                # handle_admin_extraction_button will call st.rerun() upon completion
             
             # If database is populated, check for and generate missing briefings
-            # Removed auto_generate_briefings as it was the source of threading issues. 
-            # Manual tools are now available for this.
+            # This logic remains in the code but is simplified to the manual trigger for stability.
 
         # --- Display Core UI ---
         data_board_ui()

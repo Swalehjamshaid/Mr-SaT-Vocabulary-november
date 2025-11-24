@@ -39,7 +39,7 @@ TABLE_NAME: str = "sat_vocabulary"
 
 # --- App State and Constants ---
 REQUIRED_WORD_COUNT = 2000 
-LOAD_BATCH_SIZE = 10
+LOAD_BATCH_SIZE = 50 # <-- Set to 50 for the initial fetch and pagination step size
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25
@@ -185,6 +185,7 @@ def fetch_vocabulary_batch(offset: int) -> List[Dict]:
     start_index = offset
     
     try:
+        # NOTE: Using LOAD_BATCH_SIZE (50) here
         sql_query = f"""
             SELECT * FROM {TABLE_NAME}
             ORDER BY created_at ASC
@@ -203,6 +204,7 @@ def load_and_update_vocabulary_data():
     if not st.session_state.is_auth or st.session_state.vocab_data is not None: return
 
     st.session_state.total_word_count = get_total_word_count()
+    # Initial load uses LOAD_BATCH_SIZE (50)
     vocab_list = fetch_vocabulary_batch(offset=0)
     
     st.session_state.vocab_data = vocab_list
@@ -238,6 +240,7 @@ def fetch_and_append_next_batch():
 # --- Pagination Logic (UNCHANGED) ---
 def go_to_next_page():
     total_loaded = len(st.session_state.vocab_data)
+    # MODIFICATION: Use LOAD_BATCH_SIZE for calculation
     max_index = (total_loaded // LOAD_BATCH_SIZE) - 1
     current_index = st.session_state.current_page_index
     
@@ -764,12 +767,15 @@ def display_vocabulary_ui():
 
     total_loaded_words = len(st.session_state.vocab_data)
     total_db_words = st.session_state.total_word_count
-
-    start_index = st.session_state.current_page_index * LOAD_BATCH_SIZE
-    end_index = min(start_index + LOAD_BATCH_SIZE, total_loaded_words)
+    
+    # MODIFICATION: Calculate page size based on LOAD_BATCH_SIZE (50)
+    page_size = LOAD_BATCH_SIZE
+    start_index = st.session_state.current_page_index * page_size
+    end_index = min(start_index + page_size, total_loaded_words)
     
     if start_index >= total_loaded_words and total_loaded_words > 0:
-        st.session_state.current_page_index = max(0, (total_loaded_words // LOAD_BATCH_SIZE) - 1)
+        # Recalculate index if user overshoots the last page
+        st.session_state.current_page_index = max(0, (total_loaded_words + page_size - 1) // page_size - 1)
         st.rerun()
         return
 
@@ -780,7 +786,10 @@ def display_vocabulary_ui():
     # Use columns to create an attractive, compact two-column card layout
     cols = st.columns(2)
     
-    for i, data in enumerate(st.session_state.vocab_data[start_index:end_index]):
+    # MODIFICATION: Use page_size for iterating the current view
+    current_page_data = st.session_state.vocab_data[start_index:end_index]
+    
+    for i, data in enumerate(current_page_data):
         word_number = start_index + i + 1 
         word = data.get('word', 'N/A').upper()
         pronunciation = data.get('pronunciation', 'N/A')
@@ -832,19 +841,19 @@ def display_vocabulary_ui():
     
     with col_prev:
         if st.session_state.current_page_index > 0:
-            st.button("⬅️ Previous 10 Words", on_click=go_to_prev_page)
+            st.button("⬅️ Previous Words", on_click=go_to_prev_page)
     
     with col_status:
         current_page = st.session_state.current_page_index + 1
-        max_loaded_pages = (total_loaded_words + LOAD_BATCH_SIZE - 1) // LOAD_BATCH_SIZE
+        max_loaded_pages = (total_loaded_words + page_size - 1) // page_size
         st.markdown(f"<div style='text-align: center; padding-top: 10px;'>Page {current_page} of ~{max_loaded_pages} (loaded)</div>", unsafe_allow_html=True)
 
     with col_next:
         can_go_next = (end_index < total_loaded_words) or st.session_state.has_more_data
         
-        button_label = "Next 10 Words ➡️"
+        button_label = f"Next {page_size} Words ➡️"
         if end_index == total_loaded_words and st.session_state.has_more_data:
-            button_label = "Fetch Next Batch ➡️"
+            button_label = f"Fetch Next Batch ({page_size}) ➡️"
             
         if can_go_next:
             st.button(button_label, on_click=go_to_next_page, type="secondary")
@@ -995,7 +1004,8 @@ def two_minute_drill_ui():
     selected_word_data = st.session_state.vocab_data[current_index]
     selected_word_str = selected_word_data.get('word', 'N/A').upper()
     
-    st.markdown(f"**Current Word:** **{current_index + 1}** of **{total_words}**")
+    # MODIFICATION: Use the total loaded words in RAM for the drill count
+    st.markdown(f"**Current Word:** **{current_index + 1}** of **{total_words}** (Loaded in RAM)")
 
     briefing_text = selected_word_data.get('briefing_text')
     briefing_audio_base64 = selected_word_data.get('briefing_audio_base64')

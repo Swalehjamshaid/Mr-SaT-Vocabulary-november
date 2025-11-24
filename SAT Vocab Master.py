@@ -974,22 +974,16 @@ def dummy_warning_callback():
     st.session_state.autotask_status = 'Running'
     st.rerun()
 
-@st.cache_resource
-def get_admin_container():
-    """Creates and returns a single, persistent container for the Admin UI interactive elements."""
-    return st.empty()
-
 def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     """
     Renders all interactive admin elements into the given container using simplified 
-    st.button and a single form for the background tasks to avoid structural errors.
+    st.button and eliminating complex, nested form structures.
     """
     
-    # --- MANUAL WORD ENTRY (Synchronous, simplified to use st.button) ---
+    # --- MANUAL WORD ENTRY (Synchronous) ---
     container.subheader("Manual Word & All Content Entry")
     
-    # Use st.form only for the input to ensure clean state submission if needed, 
-    # but handle the click logic outside for maximum stability.
+    # Use st.form only for the input to ensure clean state submission if needed.
     with container.form(key="manual_word_input_form", clear_on_submit=True):
         manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
         manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
@@ -1013,26 +1007,21 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     col_audio_fix, col_briefing_gen = container.columns(2)
     
     with col_audio_fix:
-        # Use simple button for immediate handler call
         container.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix_simple", type="primary", on_click=handle_bulk_audio_fix)
     with col_briefing_gen:
-        # Use simple button for immediate handler call
         container.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing_simple", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
 
     container.markdown("---")
     container.subheader("Vocabulary Extraction (Bulk - Background Task)")
     container.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
     
-    # Use simple button for immediate handler call
     container.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_simple", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
 
     container.markdown("---")
     
     container.subheader("Manual Data Refresh (Cache Bust)")
-    # This button is the crash site. Using the cached container's button method here, isolated.
-    # CRITICAL: We explicitly wrap this volatile button in a column to give it extra isolation.
-    col_refresh = container.columns(1)[0]
-    col_refresh.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
+    # This is the final button that has been crashing. Now completely isolated.
+    container.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
 
 def render_admin_status(container: st.delta_generator.DeltaGenerator):
     """Renders the disabled status message into the given container."""
@@ -1059,17 +1048,13 @@ def admin_extraction_ui():
     
     is_task_running = st.session_state.autotask_running
     
-    # Get the single, persistent container
-    interactive_container = get_admin_container()
+    # Use a simple, non-cached container for the primary rendering block.
+    primary_container = st.container() 
     
-    # Strict rendering control: Render the *entire* interactive component tree 
-    # only if the task is NOT running. Otherwise, render the status tree.
     if is_task_running:
-        render_admin_status(interactive_container)
+        render_admin_status(primary_container)
     else:
-        # Clear the container before drawing to ensure no stale disabled widgets remain
-        interactive_container.empty() 
-        render_admin_tools(interactive_container)
+        render_admin_tools(primary_container)
 
 
 # ======================================================================

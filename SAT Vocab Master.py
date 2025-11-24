@@ -39,13 +39,12 @@ TABLE_NAME: str = "sat_vocabulary"
 
 # --- App State and Constants ---
 REQUIRED_WORD_COUNT = 2000 
-LOAD_BATCH_SIZE = 50 # <-- DB Fetch step size (used when appending more data)
-INITIAL_LOAD_MAX = 500 # <-- FINAL FIX: Increased to 500. This ensures all 416 words load immediately.
-DISPLAY_PAGE_SIZE = 10 # <-- UI pagination size (set to 10 as requested)
+LOAD_BATCH_SIZE = 50 
+INITIAL_LOAD_MAX = 500
+DISPLAY_PAGE_SIZE = 10 
 QUIZ_SIZE = 5 
-AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25
-BRIEFING_BATCH_SIZE = 1 # <-- CRITICAL FIX: Changed from 10 to 1 for robust single-word error handling
+BRIEFING_BATCH_SIZE = 1 
 MANUAL_BRIEFING_BATCH = 50 
 MANUAL_EXTRACT_BATCH = 50
 
@@ -91,7 +90,6 @@ def create_table_if_not_exists(conn):
             # FIX: Use text() to explicitly declare the multiline SQL as a raw SQL string for stability
             s.execute(text(sql_create))
             s.commit()
-        # MODIFICATION: Changed st.success to print() so it does not display on the slide/UI.
         print(f"✅ Table '{TABLE_NAME}' structure verified/created with wide columns.")
     except Exception as e:
         st.error(f"🔴 FAILED to create or verify table structure: {e}")
@@ -109,15 +107,16 @@ def initialize_db_connection():
         create_table_if_not_exists(conn)
         
         # 2. Test query (optional check)
-        conn.query(f"SELECT 'success' FROM {TABLE_NAME} LIMIT 1;", ttl=0)
+        # CRITICAL FIX: Set a short TTL for a simple test query to reduce load
+        conn.query(f"SELECT 'success' FROM {TABLE_NAME} LIMIT 1;", ttl=10) 
         
-        # Display the main connection confirmation message *only* once, outside of the table creation function
         st.success("✅ Database connection (Neon/PostgreSQL) initialized and ready.")
         
         return conn
     
     except OperationalError as e:
-        st.error(f"🔴 DATABASE CONNECTION FAILED (Operational): {e}. Check your secrets.toml URL and network.")
+        # We explicitly show this error as it prevents the app from running at all
+        st.error(f"🔴 DATABASE CONNECTION FAILED (Operational): {e}. You may have exceeded your Neon quota. Check your connection URL.")
         st.stop()
     except Exception as e:
         st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}.")
@@ -161,9 +160,9 @@ def initialize_session_state():
     
     # Task Management - Simplified for synchronous execution
     if 'autotask_running' not in st.session_state: st.session_state.autotask_running = False
-    if 'autotask_message' not in st.session_state: st.session_state.autotask_message = "System Idle."
+    if 'autotask_message' not in st.session_state: st.session_state.autotask_message = "System Idle. AUTO-FETCH DISABLED (Quota Save Mode)."
     if 'autotask_status' not in st.session_state: st.session_state.autotask_status = 'Idle' 
-    
+
     # Flag to prevent auto-task from firing on the immediate run after login
     if 'initial_auth_rerun_done' not in st.session_state: st.session_state.initial_auth_rerun_done = False 
 
@@ -177,8 +176,8 @@ def initialize_session_state():
 def get_total_word_count() -> int:
     """Fetches the total document count using SQL."""
     try:
-        # Use ttl=0 to always fetch the latest count from the DB and bypass cache
-        result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME};", ttl=0)
+        # CRITICAL FIX: Use a 5-second TTL to avoid hitting the DB on every single rerun
+        result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME};", ttl=5) 
         return int(result.iloc[0, 0])
     except Exception:
         return 0
@@ -188,14 +187,13 @@ def fetch_vocabulary_batch(offset: int, limit: int) -> List[Dict]:
     start_index = offset
     
     try:
-        # NOTE: Limit is now dynamic (LOAD_BATCH_SIZE or INITIAL_LOAD_MAX)
         sql_query = f"""
             SELECT * FROM {TABLE_NAME}
             ORDER BY created_at ASC
             LIMIT {limit}
             OFFSET {offset};
         """
-        # Use a short TTL (e.g., 60s) for batch fetches, but ensure 0 for critical count checks
+        # Use a short TTL (e.g., 60s) for batch fetches
         df = db_conn.query(sql_query, ttl=60) 
         
         return df.to_dict('records')
@@ -211,7 +209,6 @@ def load_and_update_vocabulary_data():
     st.session_state.total_word_count = get_total_word_count()
     
     # Determine the limit for the initial load
-    # It should be the lesser of the total words available or the INITIAL_LOAD_MAX (500)
     initial_limit = min(st.session_state.total_word_count, INITIAL_LOAD_MAX)
     
     # Initial load uses the calculated initial_limit
@@ -234,16 +231,13 @@ def fetch_and_append_next_batch():
         return
 
     offset = len(st.session_state.vocab_data)
-    # Append uses the standard LOAD_BATCH_SIZE (50)
     next_batch = fetch_vocabulary_batch(offset=offset, limit=LOAD_BATCH_SIZE)
     
     if next_batch:
         st.session_state.vocab_data.extend(next_batch)
         
-        # FIX: Ensure total_word_count is updated after fetch
         st.session_state.total_word_count = get_total_word_count()
         
-        # Check against the total DB count, not just the batch size
         st.session_state.has_more_data = (offset + len(next_batch)) < st.session_state.total_word_count
         
         st.success(f"Loaded {len(next_batch)} more words.")
@@ -253,40 +247,32 @@ def fetch_and_append_next_batch():
         
     st.rerun()
 
-# --- Pagination Logic ---
+# --- Pagination Logic (UNCHANGED) ---
 def go_to_next_page():
     total_loaded = len(st.session_state.vocab_data)
-    # MODIFICATION: Use DISPLAY_PAGE_SIZE (10) for UI pagination calculation
     page_size = DISPLAY_PAGE_SIZE 
     max_index_in_ram = (total_loaded + page_size - 1) // page_size - 1
     current_index = st.session_state.current_page_index
     
-    # Only increment the page index if we are not at the end of the currently loaded data,
-    # or if we are at the edge and there is more data to fetch.
     if current_index < max_index_in_ram:
         st.session_state.current_page_index += 1
         st.rerun()
         return
 
-    # If we are on the last page currently loaded in RAM, try to fetch more data from DB
     if current_index >= max_index_in_ram and st.session_state.has_more_data:
-        # fetch_and_append_next_batch() handles st.rerun() internally upon success
         fetch_and_append_next_batch() 
         return
         
-    # If no more pages and no more data
     st.info("Reached the last word/page loaded.")
-    # NOTE: We do NOT call rerun here if neither condition is met.
 
 def go_to_prev_page():
     st.session_state.current_page_index -= 1
-    # FIX: Add rerun to ensure immediate UI update when going backward.
     st.rerun() 
 
-# --- Database Write Operations (SQL Implementation) ---
+# --- Database Write Operations (UNCHANGED FOR CORE LOGIC) ---
 
 def save_word_to_db(word_data: Dict) -> bool:
-    """Adds a single word document to the database using SQL, with improved error reporting and atomic commit."""
+    """Adds a single word document to the database using SQL."""
     try:
         columns = ', '.join(word_data.keys())
         values_placeholders = ', '.join([f':{key}' for key in word_data.keys()])
@@ -296,21 +282,14 @@ def save_word_to_db(word_data: Dict) -> bool:
             VALUES ({values_placeholders});
         """
         with db_conn.session as s:
-            # Execute the insert statement
             s.execute(text(sql_insert), params=word_data)
-            # CRITICAL: Commit immediately to ensure the word is saved atomically
             s.commit() 
         return True
     except IntegrityError as e:
-        # Catch errors related to UNIQUE constraints (duplicates) or NOT NULL constraints
         error_msg = f"DB Integrity Error: Word '{word_data.get('word', 'N/A')}' likely violates a UNIQUE or NOT NULL constraint. Duplicate key value violates unique constraint \"sat_vocabulary_pkey\"."
-        
-        # FIX: Suppress the large red box in the UI for expected duplicate errors. 
-        # We still print the error to the console for debugging, but don't clutter the UI.
         print(f"🔴 DUPLICATE WORD SKIPPED: {error_msg}")
         return False
     except ProgrammingError as e:
-        # Catch errors related to schema mismatch (e.g., string too long for VARCHAR)
         error_msg = f"DB Schema Error: Check column lengths/types. Details: {e.orig}"
         print(f"🔴 {error_msg}")
         st.error(error_msg)
@@ -322,7 +301,7 @@ def save_word_to_db(word_data: Dict) -> bool:
         return False
         
 def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
-    """Updates specific fields of a word document using SQL, with improved error reporting and atomic commit."""
+    """Updates specific fields of a word document using SQL."""
     try:
         with db_conn.session as s:
             set_clauses = [f"{key} = :{key}" for key in fields_to_update.keys()]
@@ -333,9 +312,7 @@ def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
                 SET {', '.join(set_clauses)}
                 WHERE word = :word_name;
             """
-            # FIX: Use text() for UPDATE for stability
             s.execute(text(sql_update), params=params)
-            # CRITICAL: Commit immediately to ensure the update is saved atomically
             s.commit()
         return True
     except IntegrityError as e:
@@ -400,13 +377,12 @@ def generate_full_briefing_content(word_data: Dict) -> Optional[Dict]:
 
 
 # ======================================================================
-# 4. SYNCHRONOUS TASK CONTROLLER
+# 4. SYNCHRONOUS TASK CONTROLLER (Auto-Maintenance is now DISABLED)
 # ======================================================================
 
 def get_all_existing_words_from_db() -> List[str]:
     """Fetches all words currently saved in the DB for the exclusion list."""
     try:
-        # Fetch only the 'word' column, which is fast and uncached (ttl=0)
         df = db_conn.query(f"SELECT word FROM {TABLE_NAME};", ttl=0)
         return df['word'].tolist()
     except Exception as e:
@@ -431,7 +407,6 @@ def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
     status_placeholder = st.empty()
     
     try:
-        # MODIFICATION: Use the most accurate word list from DB right before API call
         current_existing_words = get_all_existing_words_from_db()
         
         with st.spinner(f"Step 1/3: Requesting {num_words} words from Gemini..."):
@@ -448,10 +423,8 @@ def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
         successful_saves = 0
         enriched_words = []
         
-        # --- Enrich data with audio and briefing (Synchronous Loop) ---
         with st.spinner(f"Step 2/3: Generating TTS audio and briefings for {len(validated_words)} words..."):
             for i, word_data in enumerate(validated_words):
-                 # Update status within loop to show progress
                 status_placeholder.text(f"Step 2/3: Processing word {i+1} of {len(validated_words)}: {word_data['word']}")
                 enriched_words.append(_enrich_word_sync(word_data))
         
@@ -461,14 +434,12 @@ def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
             for word_data in enriched_words:
                 if save_word_to_db(word_data):
                     successful_saves += 1
-                # The word is saved atomically in save_word_to_db, so we continue the loop even if one fails.
         
         st.session_state.autotask_message = f"✅ Success! Extracted and saved {successful_saves} words."
-        st.session_state.vocab_data = None # Force full data reload
-        st.session_state.total_word_count = get_total_word_count() # FIX: Ensure total DB count is updated
+        st.session_state.vocab_data = None 
+        st.session_state.total_word_count = get_total_word_count()
 
     except Exception as e:
-        # Catch API quota errors or other fatal issues
         st.error(f"🔴 Extraction/Generation Failed (Synchronous): {e}")
         st.session_state.autotask_message = f"🔴 Extraction Failed: {e}"
     finally:
@@ -481,8 +452,6 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
     try:
         generated_count = 0
         
-        # Fetch data directly from DB to ensure we have the absolute latest state
-        # Filter is in the SQL query: WHERE briefing_audio_base64 IS NULL
         words_to_process_db = db_conn.query(
             f"SELECT * FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NULL ORDER BY created_at ASC LIMIT {batch_size};", ttl=0
         ).to_dict('records')
@@ -493,90 +462,50 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
             st.session_state.autotask_message = "All requested words already have briefings in the DB. Auto-maintenance complete."
             return
             
-
         with st.spinner(f"Generating missing briefings for {len(words_to_process)} words..."):
             for i, word_data in enumerate(words_to_process):
                 status_placeholder.text(f"Processing briefing {i+1} of {len(words_to_process)}: {word_data['word']}")
                 
-                # --- CRITICAL FIX: Add a try/except inside the loop ---
                 try:
                     briefing_content = generate_full_briefing_content(word_data)
                     
                     if briefing_content:
-                        # Update only the briefing fields in the database
                         if update_word_in_db(word_data, briefing_content):
                             generated_count += 1
                         
                 except Exception as e:
-                    # Log the specific word failure and continue to the next word
                     print(f"🔴 Briefing generation failed for word '{word_data['word']}': {e}. SKIPPING.")
                     
-
-                    
-        # MODIFICATION: Force a full data reload after the batch update to ensure the UI reflects changes
         st.session_state.vocab_data = None
-        st.session_state.total_word_count = get_total_word_count() # FIX: Ensure total DB count is updated
+        st.session_state.total_word_count = get_total_word_count()
 
-        # Check remaining count directly from DB
         remaining_briefings = get_words_missing_briefing_count()
         
         st.session_state.autotask_message = f"✅ Briefing batch completed: {generated_count} processed. {remaining_briefings} remaining in DB."
             
     except Exception as e:
-        # Catch any failure that happened *outside* the word loop (e.g., DB fetch error)
         st.error(f"🔴 Briefing Generation Failed (Synchronous): {e}")
         st.session_state.autotask_message = f"🔴 Briefing Generation Failed: {e}"
     finally:
         status_placeholder.empty()
 
-# New function to get the number of words missing a briefing (used for maintenance check)
 def get_words_missing_briefing_count() -> int:
     """Fetches the count of words that do not have briefing audio data."""
     try:
-        # Use ttl=0 to always fetch the latest count from the DB and bypass cache
-        result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NULL;", ttl=0)
+        # CRITICAL FIX: Use a 5-second TTL to avoid hitting the DB on every single rerun
+        result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NULL;", ttl=5) 
         return int(result.iloc[0, 0])
     except Exception:
         return 0
 
 
-# New function for autonomous maintenance logic
 def run_auto_maintenance_sync():
-    """Checks goals and executes the next batch task synchronously if needed."""
-    
-    total_words = get_total_word_count()
-    missing_briefings = get_words_missing_briefing_count()
-    
-    task_ran = False
-    
-    # Priority 1: Fix missing briefings (BRIEFING_BATCH_SIZE is small, so this is quick)
-    if missing_briefings > 0:
-        # Execute the briefing generation task
-        st.session_state.autotask_message = f"Running Auto-Briefing: {missing_briefings} briefings needed."
-        
-        # We process a small batch (BRIEFING_BATCH_SIZE) to quickly make words usable
-        batch_indices = [0] 
-        _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=BRIEFING_BATCH_SIZE)
-        task_ran = True
-        
-    # Priority 2: Generate new words if target is not met
-    elif total_words < REQUIRED_WORD_COUNT:
-        # Execute the word extraction task
-        st.session_state.autotask_message = f"Running Auto-Extraction: Target {REQUIRED_WORD_COUNT}. Current {total_words}."
-        
-        # We need to run the extraction synchronously
-        handle_admin_extraction_button(num_words=AUTO_FETCH_BATCH, auto_fetch=True)
-        task_ran = True
-        
-    # If both goals are met
-    else:
-        st.session_state.autotask_message = "Auto-Maintenance Complete. Target 2000 words reached with all briefings."
-        st.session_state.auto_fetch_triggered = True # Mark as complete
-
-    # CRITICAL FIX: RERUN if a task was just executed successfully to immediately start the next maintenance check.
-    # We check for the starting "✅" which is set on successful batch completion.
-    if task_ran and st.session_state.autotask_message.startswith("✅"):
-        st.rerun()
+    """
+    MODIFIED: This function is now DISABLED to conserve Neon quota. 
+    It returns immediately to prevent any auto-extraction or briefing.
+    """
+    # NOTE: This block is intentionally disabled.
+    return 
 
 # ======================================================================
 # 5. HANDLERS (Synchronous)
@@ -585,14 +514,14 @@ def run_auto_maintenance_sync():
 def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
     """Triggers the bulk word extraction (Synchronous)."""
     
-    # Pass existing words to LLM to avoid generating duplicates
-    # NOTE: The actual exclusion list is now fetched inside _extract_and_save_batch_sync
+    if not st.session_state.is_admin: 
+        st.error("Admin permissions required for extraction."); return
+        
     existing_words = [] 
     
     _extract_and_save_batch_sync(num_words=num_words, existing_words=existing_words)
-    # Rerun is handled by run_auto_maintenance_sync if this was part of the auto-fetch.
     if not auto_fetch:
-        st.rerun() # Force UI update after the potentially long blocking task
+        st.rerun()
 
 def handle_manual_word_entry(word: str):
     """Generates all content for a single word and saves it to the database (Synchronous)."""
@@ -602,7 +531,6 @@ def handle_manual_word_entry(word: str):
         
     try:
         with st.spinner(f"Generating content for '{word}'..."):
-            # LLM generation for structured data
             prompt = f"Generate the pronunciation, definition, mnemonic tip, and a usage sentence for the high-level SAT word: {word}. Return only the JSON object."
             list_schema = {"type": "array", "items": SatWord.model_json_schema()}
             config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
@@ -610,17 +538,15 @@ def handle_manual_word_entry(word: str):
             data_list = json.loads(response.text)
             new_word_data = SatWord(**data_list[0]).model_dump()
             
-            # Enrich with audio and briefing content (Synchronous)
             new_word_data = _enrich_word_sync(new_word_data)
             
     except Exception as e:
         st.error(f"🔴 Failed to generate content for '{word}'. Error: {e}"); return
 
     if save_word_to_db(new_word_data):
-        # Reset data load state to force reload with new word
         st.session_state.vocab_data = None 
         st.session_state.has_more_data = True
-        st.session_state.total_word_count = get_total_word_count() # FIX: Ensure total DB count is updated
+        st.session_state.total_word_count = get_total_word_count()
         st.success(f"✅ Successfully added '{new_word_data['word']}' with ALL content to DB! Reloading data...")
         st.rerun()
     else:
@@ -629,7 +555,9 @@ def handle_manual_word_entry(word: str):
 def auto_generate_briefings_manual(batch_size: int):
     """Manually triggers a large batch generation of missing briefing content (Synchronous)."""
     
-    # We load the entire data set to get the total count for processing.
+    if not st.session_state.is_admin: 
+        st.error("Admin permissions required."); return
+        
     if st.session_state.vocab_data is None:
         load_and_update_vocabulary_data()
         
@@ -637,7 +565,6 @@ def auto_generate_briefings_manual(batch_size: int):
         st.session_state.autotask_message = "No words exist in the database yet to brief!"
         return
 
-    # Create a batch of indices (0 to batch_size-1) to process the oldest words first
     total_loaded = len(st.session_state.vocab_data)
     batch_indices = list(range(min(batch_size, total_loaded)))
     
@@ -646,7 +573,7 @@ def auto_generate_briefings_manual(batch_size: int):
         return
         
     _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=batch_size)
-    st.rerun() # Force UI update after the potentially long blocking task
+    st.rerun()
 
 def handle_fix_single_audio(word_index: int):
     """Generates missing pronunciation audio for a single word and updates the DB document (Synchronous)."""
@@ -664,7 +591,7 @@ def handle_fix_single_audio(word_index: int):
         fields_to_update = {'audio_base64': audio_data}
         if update_word_in_db(word_data, fields_to_update):
             st.session_state.vocab_data[word_index].update(fields_to_update)
-            st.session_state.total_word_count = get_total_word_count() # FIX: Ensure total DB count is updated
+            st.session_state.total_word_count = get_total_word_count()
             st.success(f"✅ Successfully fixed audio for '{word}' and saved to DB.")
         else:
             st.error(f"🔴 Audio generated, but failed to save update to DB for '{word}'.")
@@ -674,6 +601,10 @@ def handle_fix_single_audio(word_index: int):
 
 def handle_bulk_audio_fix():
     """Attempts to generate and save missing pronunciation audio for all corrupted words (Synchronous)."""
+    
+    if not st.session_state.is_admin: 
+        st.error("Admin permissions required."); return
+
     words_to_fix_indices = [i for i, d in enumerate(st.session_state.vocab_data) if d.get('audio_base64') is None]
     
     if not words_to_fix_indices: st.success("All loaded words already have pronunciation audio!"); return
@@ -689,7 +620,6 @@ def handle_bulk_audio_fix():
             word_data = st.session_state.vocab_data[index]
             word = word_data['word']
             
-            # Update status
             status_placeholder.text(f"Processing audio fix {i+1} of {total_count}: {word}")
             
             audio_data = generate_tts_audio(word)
@@ -703,7 +633,7 @@ def handle_bulk_audio_fix():
                     st.warning(f"Audio fixed for {word}, but save to DB failed.")
     
     if fixed_count > 0:
-        st.session_state.total_word_count = get_total_word_count() # FIX: Ensure total DB count is updated
+        st.session_state.total_word_count = get_total_word_count()
         st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
     else:
         st.error(f"🔴 Bulk fix attempted, but audio generation failed for all {total_count} words or failed to save to DB. Check server logs/quotas.")
@@ -726,7 +656,9 @@ def handle_auth(email: str, password: str):
     st.session_state.current_page_index = 0
     st.session_state.quiz_start_index = 0
     st.session_state.drill_word_index = 0 
-    st.session_state.autotask_message = "Logged in successfully. Starting data check..."
+    
+    # MODIFICATION: Update message to reflect safe mode
+    st.session_state.autotask_message = "Logged in successfully. AUTO-FETCH DISABLED (Quota Save Mode)."
     
     # Reset flags and data to force a reload
     st.session_state.vocab_data = None
@@ -750,8 +682,6 @@ def handle_logout():
     st.session_state.initial_auth_rerun_done = False
     st.rerun()
     
-# The button functionality is REMOVED from the main UI in favor of a simpler link.
-# The callback is kept for internal use if needed.
 def manual_refresh_callback():
     """Callback function for the Force Reload Data button (SIMPLIFIED)."""
     st.session_state.vocab_data = None 
@@ -768,16 +698,14 @@ def data_board_ui():
     
     if not st.session_state.is_auth: return
     
-    # FIX: Always update the total count from DB before displaying
-    st.session_state.total_word_count = get_total_word_count()
+    # FIX: Use get_total_word_count() which has a short TTL (5s) to reduce DB load
+    st.session_state.total_word_count = get_total_word_count() 
     word_count = st.session_state.total_word_count
     
-    # Calculate missing briefings only if data is loaded
-    missing_briefing_count_ram = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')]) if st.session_state.vocab_data else 0
     loaded_count = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
     
-    # MODIFICATION: Use the new DB counter for accurate status
-    missing_briefing_count_db = get_words_missing_briefing_count() 
+    # MODIFICATION: Calculate missing briefings from loaded RAM data to save DB queries
+    missing_briefing_count_db = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')]) if st.session_state.vocab_data else 0
 
     st.header("📊 Application Status Board")
     
@@ -792,8 +720,9 @@ def data_board_ui():
     with cols[3]:
         status_message = st.session_state.get('autotask_message', "System Idle.")
         
-        # Display simplified status since background thread is gone
-        if "Running" in status_message or "Processing" in status_message:
+        if "Quota Save Mode" in status_message:
+             st.warning(f"**Status (Disabled):** {status_message}")
+        elif "Running" in status_message or "Processing" in status_message:
              st.info(f"**Status (Running):** {status_message}")
         elif "Success" in status_message or "✅" in status_message:
              st.success(f"**Status (Complete):** {status_message}")
@@ -809,19 +738,17 @@ def display_vocabulary_ui():
     st.header("📚 Vocabulary Display", divider="blue")
     
     if st.session_state.vocab_data is None or not st.session_state.vocab_data:
-        st.info("The vocabulary list is empty. Please use the **Data Tools** tab to generate the first batch of words.")
+        st.info("The vocabulary list is empty. If data existed previously, the database connection may be blocked due to quota issues.")
         return
 
     total_loaded_words = len(st.session_state.vocab_data)
     total_db_words = st.session_state.total_word_count
     
-    # MODIFICATION: Calculate page size based on DISPLAY_PAGE_SIZE (10) for UI
     page_size = DISPLAY_PAGE_SIZE 
     start_index = st.session_state.current_page_index * page_size
     end_index = min(start_index + page_size, total_loaded_words)
     
     if start_index >= total_loaded_words and total_loaded_words > 0:
-        # Recalculate index if user overshoots the last page
         st.session_state.current_page_index = max(0, (total_loaded_words + page_size - 1) // page_size - 1)
         st.rerun()
         return
@@ -830,10 +757,8 @@ def display_vocabulary_ui():
     st.markdown(f"**Showing Words {start_index + 1} - {end_index} of {total_db_words} High-Level SAT Words** (Loaded: {total_loaded_words})")
     
     
-    # Use columns to create an attractive, compact two-column card layout
     cols = st.columns(2)
     
-    # MODIFICATION: Use page_size for iterating the current view
     current_page_data = st.session_state.vocab_data[start_index:end_index]
     
     for i, data in enumerate(current_page_data):
@@ -845,10 +770,9 @@ def display_vocabulary_ui():
         usage = data.get('usage', 'N/A')
         audio_base64 = data.get('audio_base64') 
         
-        current_col = cols[i % 2] # Distribute words between the two columns
+        current_col = cols[i % 2] 
         
         with current_col.container(border=True): 
-            # Row 1: Word, Number, and Audio
             col_num, col_word_audio = st.columns([0.1, 0.9])
             
             with col_num:
@@ -867,11 +791,9 @@ def display_vocabulary_ui():
                 else:
                     st.warning("Audio not available.")
 
-            # Row 2: Definition and Tip (Compact)
             st.markdown(f"**📖 Def:** {definition.capitalize()}") 
             st.markdown(f"**💡 Tip:** *{tip}*") 
             
-            # Use expander for the full usage sentence to keep the card compact
             with st.expander("Full Usage Sentence"):
                 st.markdown(f"*{usage}*") 
                 if st.session_state.is_admin and not audio_base64:
@@ -883,7 +805,6 @@ def display_vocabulary_ui():
                         type="primary"
                     )
 
-    # Pagination controls below the columns
     col_prev, col_status, col_next = st.columns([1, 2, 1])
     
     with col_prev:
@@ -896,16 +817,13 @@ def display_vocabulary_ui():
         st.markdown(f"<div style='text-align: center; padding-top: 10px;'>Page {current_page} of ~{max_loaded_pages} (loaded)</div>", unsafe_allow_html=True)
 
     with col_next:
-        # We can go next if we haven't reached the end of loaded data OR if there is more data to fetch from DB
         can_go_next = (end_index < total_loaded_words) or st.session_state.has_more_data
         
         button_label = f"Next {page_size} Words ➡️"
-        # If we are at the end of loaded data, but more exists in DB, change the button label
         if end_index == total_loaded_words and st.session_state.has_more_data:
-            button_label = f"Fetch Next Batch ({LOAD_BATCH_SIZE}) ➡️" # Show the DB fetch size
+            button_label = f"Fetch Next Batch ({LOAD_BATCH_SIZE}) ➡️"
             
         if can_go_next:
-            # The on_click handler will decide whether to increment page or fetch more data
             st.button(button_label, on_click=go_to_next_page, type="secondary")
 
 def generate_quiz_ui():
@@ -915,7 +833,7 @@ def generate_quiz_ui():
     total_words = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
     
     if total_words < QUIZ_SIZE:
-        st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}. Please generate more data.")
+        st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}. Please use the loaded data.")
         return
 
     start_word_num = st.session_state.quiz_start_index + 1
@@ -933,7 +851,9 @@ def generate_quiz_ui():
         
         for question_data in words_pool:
             correct_answer = question_data['definition'].capitalize()
-            decoys = random.sample([d for d in all_definitions_list if d != correct_answer], min(3, len([d for d in all_definitions_list if d != correct_answer])))
+            # Ensure we don't try to sample more decoys than are available
+            available_decoys = [d for d in all_definitions_list if d != correct_answer]
+            decoys = random.sample(available_decoys, min(3, len(available_decoys)))
             options = [correct_answer] + decoys
             random.shuffle(options)
             original_word_index = st.session_state.vocab_data.index(question_data) + 1
@@ -1044,7 +964,7 @@ def two_minute_drill_ui():
         st.rerun()
 
     if st.session_state.vocab_data is None or not st.session_state.vocab_data:
-        st.info("No vocabulary loaded yet. Please generate some words via the Data Tools tab."); return
+        st.info("No vocabulary loaded yet. Please use the loaded data in the Vocabulary List tab."); return
 
     total_words = len(st.session_state.vocab_data)
     current_index = st.session_state.drill_word_index
@@ -1054,7 +974,6 @@ def two_minute_drill_ui():
     selected_word_data = st.session_state.vocab_data[current_index]
     selected_word_str = selected_word_data.get('word', 'N/A').upper()
     
-    # MODIFICATION: Use the total loaded words in RAM for the drill count
     st.markdown(f"**Current Word:** **{current_index + 1}** of **{total_words}** (Loaded in RAM)")
 
     briefing_text = selected_word_data.get('briefing_text')
@@ -1068,10 +987,8 @@ def two_minute_drill_ui():
         st.success("Briefing content loaded from database.")
     
     if not briefing_exists_in_db and st.session_state.is_admin:
-        st.warning(f"Briefing content missing for {selected_word_str}. Generate it now!")
-        # Use standard button outside of complex form to prevent conflict
-        if st.button(f"Generate and Save Briefing for {selected_word_str}", type="primary", key="manual_drill_gen"):
-            auto_generate_briefings_manual(1); st.rerun() 
+        st.warning(f"Briefing content missing for {selected_word_str}. **Cannot generate due to quota issues.**")
+        st.button(f"Generate and Save Briefing for {selected_word_str} (CURRENTLY DISABLED)", disabled=True, key="manual_drill_gen")
     
     if briefing:
         st.subheader(f"Deep Dive: {selected_word_str}")
@@ -1088,7 +1005,7 @@ def two_minute_drill_ui():
         st.markdown("---")
         st.info(f"The briefing is about {len(briefing['text'].split())} words long.")
     elif not briefing_exists_in_db and not st.session_state.is_admin:
-        st.info("The 2-Minute Briefing for this word is currently missing. The Admin is running an automatic fix task to generate this content. Please check back later!")
+        st.info("The 2-Minute Briefing for this word is currently missing. It cannot be generated until the database quota is resolved.")
     
     col_prev, col_next = st.columns([1, 1])
     
@@ -1103,53 +1020,49 @@ def two_minute_drill_ui():
 def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     """
     Renders all interactive admin elements into the given container. 
-    The problematic "Force Reload Data" button is removed and replaced with a link
-    to prevent the StreamlitAPIException crash.
+    All database write/API generation tools are disabled.
     """
     
-    # --- MANUAL WORD ENTRY (Synchronous) ---
-    container.subheader("Manual Word & All Content Entry")
+    container.warning("🚨 **DB QUOTA ALERT:** All content generation and bulk data tools are **DISABLED** to prevent further connection failures and save your remaining quota. The app is in Read-Only Mode.")
+
+    container.markdown("---")
+    # --- MANUAL WORD ENTRY (DISABLED) ---
+    container.subheader("Manual Word & All Content Entry (DISABLED)")
     
     with container.form(key="manual_word_input_form", clear_on_submit=True):
-        manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
-        manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
-        if manual_submit: 
-            handle_manual_word_entry(manual_word)
-            return
+        manual_word = st.text_input("Enter SAT-Level Word to Add:", disabled=True).strip()
+        st.form_submit_button("Generate ALL Content (DISABLED)", disabled=True)
 
     container.markdown("---")
     
-    # --- BULK AND REFRESH TOOLS (Synchronous Calls) ---
-    container.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
+    # --- BULK AND REFRESH TOOLS (DISABLED) ---
+    container.subheader("Audio Integrity & Bulk Fix (DISABLED)")
     
     if st.session_state.vocab_data:
         missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-        # MODIFICATION: Use the DB count for accurate display
-        missing_briefing_count = get_words_missing_briefing_count() 
+        missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
     else: missing_audio_count = 0; missing_briefing_count = 0
             
     container.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
-    container.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
+    container.markdown(f"**Missing Briefings (2-Min Drill):** {missing_briefing_count} words.") 
     
     col_audio_fix, col_briefing_gen = container.columns(2)
     
     with col_audio_fix:
-        container.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix_sync", type="primary", on_click=handle_bulk_audio_fix)
+        container.button("Attempt Bulk Audio Fix (DISABLED)", disabled=True, key="btn_bulk_audio_fix_sync", type="primary")
     with col_briefing_gen:
-        container.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Blocking)", key="btn_force_briefing_sync", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
+        container.button(f"Force Generate Missing Briefings (DISABLED)", disabled=True, key="btn_force_briefing_sync", type="secondary")
 
     container.markdown("---")
-    container.subheader("Vocabulary Extraction (Bulk - Blocking)")
-    # FIX: Ensure total_word_count is updated on display
+    container.subheader("Vocabulary Extraction (DISABLED)")
     container.session_state.total_word_count = get_total_word_count()
     container.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
     
-    container.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Blocking)", key="btn_force_extract_sync", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+    container.button(f"Force Extract New Words (DISABLED)", disabled=True, key="btn_force_extract_sync", type="secondary")
 
     container.markdown("---")
     
     container.subheader("Manual Data Refresh (Cache Bust)")
-    # REPLACED UNSTABLE BUTTON with descriptive markdown link
     container.markdown(
         """
         **To Force Data Reload:** This clears the local cache and re-fetches all words from the DB. 
@@ -1160,7 +1073,6 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
 
 def render_admin_status(container: st.delta_generator.DeltaGenerator):
     """Renders the status message when tasks are running (SIMPLIFIED)."""
-    # Since all tasks are synchronous, this is only used for displaying the *current* process status (which is fast)
     container.info(f"**Status:** {st.session_state.autotask_message}")
     container.markdown("---")
     container.subheader("All Tools Interactive")
@@ -1217,15 +1129,13 @@ def main():
             with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
                 load_and_update_vocabulary_data()
             
-            # Since the data load is synchronous, we use this to trigger the auto-fetch check
             if not st.session_state.initial_auth_rerun_done:
                  st.session_state.initial_auth_rerun_done = True
-                 st.rerun() # Ensure UI updates with loaded count
+                 st.rerun() 
 
-        # 2. AUTOMATIC MAINTENANCE LOGIC (Continuous Check on Rerun)
-        # MODIFICATION: Replaced old auto-fetch logic with the new continuous maintenance task.
+        # 2. AUTOMATIC MAINTENANCE LOGIC (DISABLED TO SAVE QUOTA)
+        # We intentionally call this function but its internal logic is now a simple 'return'
         if st.session_state.is_admin and st.session_state.initial_load_done and st.session_state.initial_auth_rerun_done:
-            # Run the unified auto-maintenance task if admin is logged in
             run_auto_maintenance_sync()
 
         # --- Display Core UI ---

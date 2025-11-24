@@ -130,6 +130,9 @@ def initialize_session_state():
     if 'autotask_running' not in st.session_state: st.session_state.autotask_running = False
     if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None
     if 'autotask_status' not in st.session_state: st.session_state.autotask_status = 'Idle' 
+    
+    # CRITICAL FIX: UI Draw Guard
+    if 'is_running_ui_draw' not in st.session_state: st.session_state.is_running_ui_draw = False
 
     # LAZY LOADING STATE MANAGEMENT
     if 'has_more_data' not in st.session_state: st.session_state.has_more_data = True
@@ -314,6 +317,10 @@ class LongRunningTaskController:
             st.session_state.task_thread = None
 
     def _update_session_state(self, status: str, message: str, running: bool):
+        # CRITICAL FIX: Add a brief wait here if the UI is actively drawing
+        if st.session_state.is_running_ui_draw:
+             time.sleep(0.5) # Wait for half a second before changing state and rerunning
+
         st.session_state.autotask_status = status
         st.session_state.autotask_message = message
         st.session_state.autotask_running = running
@@ -981,6 +988,9 @@ def admin_extraction_ui():
     
     is_task_running = st.session_state.autotask_running
     
+    # CRITICAL FIX: Set UI Draw Guard ON
+    st.session_state.is_running_ui_draw = True
+    
     # Placeholder for the interactive form/buttons
     interactive_container = st.empty()
     
@@ -998,57 +1008,56 @@ def admin_extraction_ui():
              st.markdown("---")
              st.subheader("Manual Data Refresh (Cache Bust)")
              st.button("Force Reload Data from DB", key="btn_force_reload_disp", type="danger", disabled=True)
-        return
-        
-    # If no task is running, render the full interactive UI in the placeholder
-    with interactive_container.container():
-        
-        # --- MANUAL WORD ENTRY (Synchronous) ---
-        st.subheader("Manual Word & All Content Entry")
-        with st.form(key="manual_word_form", clear_on_submit=False):
-            # This input uses a key that only exists when the task is NOT running
-            manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
-            manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
-            if manual_submit: 
-                handle_manual_word_entry(manual_word)
-                return
+    else:
+        # If no task is running, render the full interactive UI in the placeholder
+        with interactive_container.container():
+            
+            # --- MANUAL WORD ENTRY (Synchronous) ---
+            st.subheader("Manual Word & All Content Entry")
+            with st.form(key="manual_word_form", clear_on_submit=False):
+                # This input uses a key that only exists when the task is NOT running
+                manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
+                manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
+                if manual_submit: 
+                    handle_manual_word_entry(manual_word)
+                    return
 
-        st.markdown("---")
-        
-        # --- BULK AND REFRESH TOOLS (ISOLATED IN A NON-SUBMITTING FORM) ---
-        st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
-        
-        if st.session_state.vocab_data:
-            missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-            missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
-        else: missing_audio_count = 0; missing_briefing_count = 0
+            st.markdown("---")
+            
+            # --- BULK AND REFRESH TOOLS (ISOLATED IN A NON-SUBMITTING FORM) ---
+            st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
+            
+            if st.session_state.vocab_data:
+                missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
+                missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+            else: missing_audio_count = 0; missing_briefing_count = 0
+                    
+            st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
+            st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
+            
+            # Encapsulate all action buttons in this separate non-submitting form
+            with st.form(key="bulk_actions_form", clear_on_submit=False):
+                col_audio_fix, col_briefing_gen = st.columns(2)
                 
-        st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
-        st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
-        
-        # Encapsulate all action buttons in this separate non-submitting form
-        # CRITICAL FIX: The use of st.form_submit_button ensures the button clicks are processed atomically
-        # and do not conflict with the background thread's state modification during a normal button click.
-        with st.form(key="bulk_actions_form", clear_on_submit=False):
-            col_audio_fix, col_briefing_gen = st.columns(2)
-            
-            with col_audio_fix:
-                st.form_submit_button("Attempt Bulk Audio Fix", type="primary", on_click=handle_bulk_audio_fix)
-            with col_briefing_gen:
-                st.form_submit_button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
+                with col_audio_fix:
+                    st.form_submit_button("Attempt Bulk Audio Fix", type="primary", on_click=handle_bulk_audio_fix)
+                with col_briefing_gen:
+                    st.form_submit_button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
 
-            st.markdown("---")
-            st.subheader("Vocabulary Extraction (Bulk - Background Task)")
-            st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
-            
-            st.form_submit_button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_form", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+                st.markdown("---")
+                st.subheader("Vocabulary Extraction (Bulk - Background Task)")
+                st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+                
+                st.form_submit_button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_form", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
 
-            st.markdown("---")
-            st.subheader("Manual Data Refresh (Cache Bust)")
-            
-            # This is the line that keeps crashing. Since it's now inside the isolated form, 
-            # and the entire form rendering is skipped when is_task_running is True, this should solve the issue.
-            st.form_submit_button("Force Reload Data from DB", key="btn_force_reload_form", type="danger", on_click=manual_refresh_callback)
+                st.markdown("---")
+                st.subheader("Manual Data Refresh (Cache Bust)")
+                
+                # This is the line that caused the crash, now rendered only in the non-running path.
+                st.form_submit_button("Force Reload Data from DB", key="btn_force_reload_form", type="danger", on_click=manual_refresh_callback)
+    
+    # CRITICAL FIX: Set UI Draw Guard OFF immediately after rendering logic completes
+    st.session_state.is_running_ui_draw = False
 
 
 # ======================================================================

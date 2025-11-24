@@ -12,10 +12,12 @@ from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 from pydantic import BaseModel, Field
+# Import necessary status codes for robust error checking
+from gotrue.errors import AuthApiError
+from postgrest.exceptions import APIError as PostgrestAPIError
 
 # --- EXTERNAL API IMPORTS ---
 try:
-    # Supabase Client Import (Supabase is the database used)
     from supabase import create_client, Client as SupabaseClient
 except ImportError:
     st.error("SUPABASE ERROR: The required library 'supabase' is likely missing. Please install it.")
@@ -40,7 +42,8 @@ except ImportError:
 # ======================================================================
 
 # --- Database Constants ---
-TABLE_NAME: str = "sat_vocabulary" # CRITICAL: Ensure this matches your Supabase table name
+# Defined outside initialization to be accessible globally
+TABLE_NAME: str = "sat_vocabulary" 
 
 # --- App State and Constants (UNCHANGED) ---
 REQUIRED_WORD_COUNT = 2000 
@@ -73,9 +76,8 @@ class SatWord(BaseModel):
 # 2. SETUP & INITIALIZATION (Database and AI Clients)
 # ======================================================================
 
-# --- DATABASE CLIENT INITIALIZATION (Supabase Implementation via Secrets) ---
 @st.cache_resource
-def initialize_db_client() -> SupabaseClient:
+def initialize_db_client() -> Optional[SupabaseClient]:
     """Initializes the database client (Supabase) using Streamlit secrets."""
     try:
         # Fetch URL and Key from the secrets file
@@ -84,8 +86,17 @@ def initialize_db_client() -> SupabaseClient:
         
         client: SupabaseClient = create_client(url, key)
         
-        # Test connectivity by attempting a small query
-        client.from_(TABLE_NAME).select("word").limit(1).execute() 
+        # Test connectivity and table existence with specific error handling
+        try:
+            client.from_(TABLE_NAME).select("word").limit(1).execute() 
+        except PostgrestAPIError as e:
+            if "not find the table" in str(e):
+                st.error(f"🔴 DATABASE TABLE MISSING: Could not find table '{TABLE_NAME}'.")
+                st.warning("ACTION: Please create the table in your Supabase dashboard or check the `TABLE_NAME` variable in the Python code.")
+                # We return None instead of stopping, allowing the app to render the error
+                return None
+            else:
+                 raise e # Raise other API errors
         
         st.success("✅ Database client (Supabase) initialized and connected.")
         return client
@@ -94,9 +105,10 @@ def initialize_db_client() -> SupabaseClient:
         st.error(f"🔴 CONFIGURATION ERROR: Missing secret key {e} under [database_client]. Please update secrets.toml.")
         st.stop()
     except Exception as e:
-        st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}. Check URL, Key, and table name ('{TABLE_NAME}').")
+        st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}.")
         st.stop()
 
+# --- Global Database Client Initialization ---
 try:
     db_client = initialize_db_client()
 except Exception:
@@ -113,9 +125,18 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
+# CRITICAL CHECK: If db_client is None due to table error, stop script execution
+if db_client is None:
+    st.stop()
+
+
 # ======================================================================
-# 3. CORE UTILITIES & LAZY LOADING
+# 3. CORE UTILITIES & LAZY LOADING (Implementation uses db_client)
 # ======================================================================
+
+# ... (The rest of the functions like initialize_session_state, get_total_word_count, 
+# fetch_vocabulary_batch, save_word_to_db, update_word_in_db, etc., remain exactly 
+# as provided in the last response, using the db_client variable.)
 
 def initialize_session_state():
     """Sets up default session state variables."""
@@ -143,7 +164,6 @@ def initialize_session_state():
 def get_total_word_count() -> int:
     """Fetches the total document count using the database client (Supabase)."""
     try:
-        # Supabase implementation of total count
         response = db_client.from_(TABLE_NAME).select("count", count="exact").limit(0).execute()
         return response.count if response and response.count is not None else 0
     except Exception as e:
@@ -156,7 +176,6 @@ def fetch_vocabulary_batch(offset: int) -> List[Dict]:
     end_index = offset + LOAD_BATCH_SIZE - 1
     
     try:
-        # Supabase implementation of batch fetch: ordered by creation time
         response = (
             db_client.from_(TABLE_NAME)
             .select("*")
@@ -338,7 +357,9 @@ class LongRunningTaskController:
             prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
             list_schema = {"type": "array", "items": SatWord.model_json_schema()}
             config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
-            response = gemini_client.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=config)
+            response = gemini_client.models.generate_content(
+                model="gemini-2.5-flash", contents=prompt, config=config
+            )
             new_data_list = json.loads(response.text)
             validated_words = [SatWord(**item).model_dump() for item in new_data_list if 'word' in item]
 
@@ -577,12 +598,10 @@ def handle_auth(email: str, password: str):
     st.session_state.drill_word_index = 0 
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
     
-    # Reset lazy load state on successful login
     st.session_state.vocab_data = None
     st.session_state.has_more_data = True
     st.session_state.total_word_count = 0
 
-    # SYNCHRONOUS LOAD WITH VISUAL SPINNER (Fast load of first batch)
     with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
         load_and_update_vocabulary_data() 
         

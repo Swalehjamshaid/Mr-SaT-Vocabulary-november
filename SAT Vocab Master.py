@@ -417,6 +417,7 @@ def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
         st.rerun()
 
     except Exception as e:
+        # Catch API quota errors or other fatal issues
         st.error(f"🔴 Extraction/Generation Failed (Synchronous): {e}")
         st.session_state.autotask_message = f"🔴 Extraction Failed: {e}"
     finally:
@@ -668,7 +669,7 @@ def data_board_ui():
     st.markdown("---")
 
 def display_vocabulary_ui():
-    """Renders the Vocabulary Display feature with Paging functionality based on loaded data."""
+    """Renders the Vocabulary Display feature with Paging functionality based on loaded data, using a compact, attractive layout."""
     st.header("📚 Vocabulary Display", divider="blue")
     
     if st.session_state.vocab_data is None or not st.session_state.vocab_data:
@@ -690,49 +691,57 @@ def display_vocabulary_ui():
     st.markdown(f"**Showing Words {start_index + 1} - {end_index} of {total_db_words} High-Level SAT Words** (Loaded: {total_loaded_words})")
     
     
-    with st.container(border=True): 
+    # Use columns to create an attractive, compact two-column card layout
+    cols = st.columns(2)
+    
+    for i, data in enumerate(st.session_state.vocab_data[start_index:end_index]):
+        word_number = start_index + i + 1 
+        word = data.get('word', 'N/A').upper()
+        pronunciation = data.get('pronunciation', 'N/A')
+        definition = data.get('definition', 'N/A')
+        tip = data.get('tip', 'N/A')
+        usage = data.get('usage', 'N/A')
+        audio_base64 = data.get('audio_base64') 
         
-        for i, data in enumerate(st.session_state.vocab_data[start_index:end_index]):
-            word_number = start_index + i + 1 
-            word = data.get('word', 'N/A').upper()
-            pronunciation = data.get('pronunciation', 'N/A')
-            definition = data.get('definition', 'N/A')
-            tip = data.get('tip', 'N/A')
-            usage = data.get('usage', 'N/A')
-            audio_base64 = data.get('audio_base64') 
+        current_col = cols[i % 2] # Distribute words between the two columns
+        
+        with current_col.container(border=True): 
+            # Row 1: Word, Number, and Audio
+            col_num, col_word_audio = st.columns([0.1, 0.9])
             
-            expander_title = f"**{word_number}. {word}** — {pronunciation}" 
-            
-            with st.expander(expander_title):
+            with col_num:
+                st.markdown(f"**{word_number}.**")
+                
+            with col_word_audio:
+                st.markdown(f"**{word}** *({pronunciation})*")
                 if audio_base64:
                     audio_data_url = f"data:audio/mp3;base64,{audio_base64}"
                     audio_html = f"""
-                        <audio controls style="width: 100%;" src="{audio_data_url}">
+                        <audio controls style="width: 100%; height: 25px;" src="{audio_data_url}">
                             Your browser does not support the audio element.
                         </audio>
                     """
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
-                    st.warning("Audio not available for this word.")
-                    # Button logic relies on st.session_state.autotask_running, which caused the error.
-                    # We rely on the master disable in the Admin UI now.
-                    if st.session_state.is_admin:
-                        # Use conditional check inside the button to prevent crash
-                        st.button(
-                            f"Fix Audio for #{word_number}", 
-                            key=f"fix_audio_{start_index + i}", 
-                            on_click=handle_fix_single_audio, 
-                            args=(start_index + i,),
-                            type="primary"
-                        )
+                    st.warning("Audio not available.")
 
-                st.markdown(f"**📖 Definition:** {definition.capitalize()}") 
-                st.markdown(f"**💡 Memory Tip:** *{tip}*") 
-                st.markdown(f"**🗣️ Usage:** *'{usage}'*") 
+            # Row 2: Definition and Tip (Compact)
+            st.markdown(f"**📖 Def:** {definition.capitalize()}") 
+            st.markdown(f"**💡 Tip:** *{tip}*") 
             
-            if i < LOAD_BATCH_SIZE - 1 and (start_index + i + 1) < total_loaded_words:
-                 st.markdown("---")
+            # Use expander for the full usage sentence to keep the card compact
+            with st.expander("Full Usage Sentence"):
+                 st.markdown(f"*{usage}*") 
+                 if st.session_state.is_admin and not audio_base64:
+                    st.button(
+                        f"Fix Audio for #{word_number}", 
+                        key=f"fix_audio_{start_index + i}", 
+                        on_click=handle_fix_single_audio, 
+                        args=(start_index + i,),
+                        type="primary"
+                    )
 
+    # Pagination controls below the columns
     col_prev, col_status, col_next = st.columns([1, 2, 1])
     
     with col_prev:
@@ -947,14 +956,14 @@ def two_minute_drill_ui():
 
 def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     """
-    Renders all interactive admin elements into the given container using simplified 
-    st.button and synchronous execution handlers.
+    Renders all interactive admin elements into the given container. 
+    The problematic "Force Reload Data" button is removed and replaced with a link
+    to prevent the StreamlitAPIException crash.
     """
     
     # --- MANUAL WORD ENTRY (Synchronous) ---
     container.subheader("Manual Word & All Content Entry")
     
-    # Use st.form only for the input to ensure clean state submission if needed.
     with container.form(key="manual_word_input_form", clear_on_submit=True):
         manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
         manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
@@ -991,7 +1000,8 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     container.markdown("---")
     
     container.subheader("Manual Data Refresh (Cache Bust)")
-    container.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
+    # REMOVED: The problematic st.button("Force Reload Data from DB")
+    container.button("Trigger Data Reload", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
 
 
 def render_admin_status(container: st.delta_generator.DeltaGenerator):

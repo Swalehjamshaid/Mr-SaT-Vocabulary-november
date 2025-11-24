@@ -43,8 +43,6 @@ LOAD_BATCH_SIZE = 50
 INITIAL_LOAD_MAX = 500
 DISPLAY_PAGE_SIZE = 10 
 QUIZ_SIZE = 5 
-AUTO_FETCH_BATCH = 25
-BRIEFING_BATCH_SIZE = 1 
 MANUAL_BRIEFING_BATCH = 50 
 MANUAL_EXTRACT_BATCH = 50
 
@@ -87,12 +85,12 @@ def create_table_if_not_exists(conn):
     """
     try:
         with conn.session as s:
-            # FIX: Use text() to explicitly declare the multiline SQL as a raw SQL string for stability
             s.execute(text(sql_create))
             s.commit()
         print(f"✅ Table '{TABLE_NAME}' structure verified/created with wide columns.")
     except Exception as e:
-        st.error(f"🔴 FAILED to create or verify table structure: {e}")
+        # This will fail first if the quota is exceeded
+        st.error(f"🔴 FAILED to create or verify table structure: {e}. Check Neon Quota!")
         st.stop()
 
 
@@ -100,14 +98,12 @@ def create_table_if_not_exists(conn):
 def initialize_db_connection():
     """Initializes and returns the Streamlit SQL connection object."""
     try:
-        # Uses the URL from [connections.neon_db] in secrets.toml
         conn = st.connection("neon_db", type="sql")
         
-        # 1. Ensure connectivity and proper table structure
+        # 1. Ensure connectivity and proper table structure (This is the first quota hit)
         create_table_if_not_exists(conn)
         
-        # 2. Test query (optional check)
-        # CRITICAL FIX: Set a short TTL for a simple test query to reduce load
+        # 2. Test query (short TTL to reduce load)
         conn.query(f"SELECT 'success' FROM {TABLE_NAME} LIMIT 1;", ttl=10) 
         
         st.success("✅ Database connection (Neon/PostgreSQL) initialized and ready.")
@@ -115,8 +111,7 @@ def initialize_db_connection():
         return conn
     
     except OperationalError as e:
-        # We explicitly show this error as it prevents the app from running at all
-        st.error(f"🔴 DATABASE CONNECTION FAILED (Operational): {e}. You may have exceeded your Neon quota. Check your connection URL.")
+        st.error(f"🔴 DATABASE CONNECTION FAILED (Operational): {e}. You MUST resolve the Neon quota issue to proceed.")
         st.stop()
     except Exception as e:
         st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}.")
@@ -163,20 +158,17 @@ def initialize_session_state():
     if 'autotask_message' not in st.session_state: st.session_state.autotask_message = "System Idle. AUTO-FETCH DISABLED (Quota Save Mode)."
     if 'autotask_status' not in st.session_state: st.session_state.autotask_status = 'Idle' 
 
-    # Flag to prevent auto-task from firing on the immediate run after login
     if 'initial_auth_rerun_done' not in st.session_state: st.session_state.initial_auth_rerun_done = False 
 
-    # LAZY LOADING STATE MANAGEMENT
     if 'has_more_data' not in st.session_state: st.session_state.has_more_data = True
     if 'total_word_count' not in st.session_state: st.session_state.total_word_count = 0
-    # Flag to ensure auto-fetch runs only once per session if needed
     if 'auto_fetch_triggered' not in st.session_state: st.session_state.auto_fetch_triggered = False
 
 
 def get_total_word_count() -> int:
     """Fetches the total document count using SQL."""
     try:
-        # CRITICAL FIX: Use a 5-second TTL to avoid hitting the DB on every single rerun
+        # Use a 5-second TTL to avoid hitting the DB on every single rerun
         result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME};", ttl=5) 
         return int(result.iloc[0, 0])
     except Exception:
@@ -377,12 +369,13 @@ def generate_full_briefing_content(word_data: Dict) -> Optional[Dict]:
 
 
 # ======================================================================
-# 4. SYNCHRONOUS TASK CONTROLLER (Auto-Maintenance is now DISABLED)
+# 4. SYNCHRONOUS TASK CONTROLLER (Auto-Maintenance is DISABLED)
 # ======================================================================
 
 def get_all_existing_words_from_db() -> List[str]:
-    """Fetches all words currently saved in the DB for the exclusion list."""
+    """Fetches ONLY the 'word' column for the exclusion list (Optimization)."""
     try:
+        # CRITICAL FIX: Only fetch the small 'word' column to minimize data transfer
         df = db_conn.query(f"SELECT word FROM {TABLE_NAME};", ttl=0)
         return df['word'].tolist()
     except Exception as e:
@@ -492,7 +485,7 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
 def get_words_missing_briefing_count() -> int:
     """Fetches the count of words that do not have briefing audio data."""
     try:
-        # CRITICAL FIX: Use a 5-second TTL to avoid hitting the DB on every single rerun
+        # Use a 5-second TTL to avoid hitting the DB on every single rerun
         result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NULL;", ttl=5) 
         return int(result.iloc[0, 0])
     except Exception:
@@ -504,7 +497,7 @@ def run_auto_maintenance_sync():
     MODIFIED: This function is now DISABLED to conserve Neon quota. 
     It returns immediately to prevent any auto-extraction or briefing.
     """
-    # NOTE: This block is intentionally disabled.
+    # NOTE: This block is intentionally disabled to conserve DB quota.
     return 
 
 # ======================================================================
@@ -657,10 +650,9 @@ def handle_auth(email: str, password: str):
     st.session_state.quiz_start_index = 0
     st.session_state.drill_word_index = 0 
     
-    # MODIFICATION: Update message to reflect safe mode
     st.session_state.autotask_message = "Logged in successfully. AUTO-FETCH DISABLED (Quota Save Mode)."
     
-    # Reset flags and data to force a reload
+    # Reset flags and data to force a reload from the DB
     st.session_state.vocab_data = None
     st.session_state.has_more_data = True
     st.session_state.total_word_count = 0
@@ -1134,8 +1126,8 @@ def main():
                  st.rerun() 
 
         # 2. AUTOMATIC MAINTENANCE LOGIC (DISABLED TO SAVE QUOTA)
-        # We intentionally call this function but its internal logic is now a simple 'return'
         if st.session_state.is_admin and st.session_state.initial_load_done and st.session_state.initial_auth_rerun_done:
+            # This function returns immediately due to quota limits
             run_auto_maintenance_sync()
 
         # --- Display Core UI ---

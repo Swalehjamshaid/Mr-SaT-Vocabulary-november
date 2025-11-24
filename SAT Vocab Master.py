@@ -1027,6 +1027,8 @@ def admin_extraction_ui():
         st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
         
         # Encapsulate all action buttons in this separate non-submitting form
+        # CRITICAL FIX: The use of st.form_submit_button ensures the button clicks are processed atomically
+        # and do not conflict with the background thread's state modification during a normal button click.
         with st.form(key="bulk_actions_form", clear_on_submit=False):
             col_audio_fix, col_briefing_gen = st.columns(2)
             
@@ -1044,7 +1046,8 @@ def admin_extraction_ui():
             st.markdown("---")
             st.subheader("Manual Data Refresh (Cache Bust)")
             
-            # This button, which caused the crash, is now inside a clean st.form block
+            # This is the line that keeps crashing. Since it's now inside the isolated form, 
+            # and the entire form rendering is skipped when is_task_running is True, this should solve the issue.
             st.form_submit_button("Force Reload Data from DB", key="btn_force_reload_form", type="danger", on_click=manual_refresh_callback)
 
 

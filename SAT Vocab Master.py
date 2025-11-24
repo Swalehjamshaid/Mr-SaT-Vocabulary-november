@@ -13,6 +13,8 @@ import streamlit as st
 from pydantic import BaseModel, Field
 import pandas as pd # Required for reading SQL results
 import sqlalchemy # Required by st.connection('sql')
+# Import specific error type from SQLAlchemy
+from sqlalchemy.exc import IntegrityError, ProgrammingError 
 
 # --- EXTERNAL API IMPORTS ---
 try:
@@ -222,7 +224,7 @@ def go_to_prev_page():
 # --- Database Write Operations (SQL Implementation) ---
 
 def save_word_to_db(word_data: Dict) -> bool:
-    """Adds a single word document to the database using SQL."""
+    """Adds a single word document to the database using SQL, with improved error reporting."""
     try:
         columns = ', '.join(word_data.keys())
         values_placeholders = ', '.join([f':{key}' for key in word_data.keys()])
@@ -235,12 +237,26 @@ def save_word_to_db(word_data: Dict) -> bool:
             s.execute(sql_insert, params=word_data)
             s.commit()
         return True
+    except IntegrityError as e:
+        # Catch errors related to UNIQUE constraints (duplicates) or NOT NULL constraints
+        error_msg = f"DB Integrity Error: Word '{word_data.get('word', 'N/A')}' likely violates a UNIQUE or NOT NULL constraint. Details: {e.orig}"
+        print(f"🔴 {error_msg}")
+        st.error(error_msg)
+        return False
+    except ProgrammingError as e:
+        # Catch errors related to schema mismatch (e.g., string too long for VARCHAR)
+        error_msg = f"DB Schema Error: Check column lengths/types. Details: {e.orig}"
+        print(f"🔴 {error_msg}")
+        st.error(error_msg)
+        return False
     except Exception as e:
-        print(f"🔴 DB Save Failed for {word_data['word']}: {e}")
+        error_msg = f"DB Save Failed for {word_data.get('word', 'N/A')}: {e}"
+        print(f"🔴 {error_msg}")
+        st.error(f"🔴 Unknown DB Error: {error_msg}")
         return False
         
 def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
-    """Updates specific fields of a word document using SQL."""
+    """Updates specific fields of a word document using SQL, with improved error reporting."""
     try:
         with db_conn.session as s:
             set_clauses = [f"{key} = :{key}" for key in fields_to_update.keys()]
@@ -254,8 +270,20 @@ def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
             s.execute(sql_update, params=params)
             s.commit()
         return True
+    except IntegrityError as e:
+        error_msg = f"DB Integrity Update Error: Word '{word_data.get('word', 'N/A')}' update failed on constraint. Details: {e.orig}"
+        print(f"🔴 {error_msg}")
+        st.error(error_msg)
+        return False
+    except ProgrammingError as e:
+        error_msg = f"DB Schema Update Error: Check updated column lengths/types. Details: {e.orig}"
+        print(f"🔴 {error_msg}")
+        st.error(error_msg)
+        return False
     except Exception as e:
-        print(f"🔴 DB Update Failed for {word_data['word']}: {e}")
+        error_msg = f"DB Update Failed for {word_data.get('word', 'N/A')}: {e}"
+        print(f"🔴 {error_msg}")
+        st.error(f"🔴 Unknown DB Update Error: {error_msg}")
         return False
 
 # --- Core Utilities (UNCHANGED) ---

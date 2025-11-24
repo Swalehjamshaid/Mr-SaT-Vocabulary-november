@@ -957,10 +957,8 @@ def admin_extraction_ui():
         st.info("🛑 **A Background Task is Running!** All data manipulation buttons are temporarily disabled to prevent errors.")
     
     # Use the status of the background task to disable the container content
+    # All buttons inside here use the 'disabled=is_task_running' property.
     with st.container():
-        
-        # NOTE: We rely on the Python object rendering to handle the disable logic
-        # For simplicity and to avoid the Streamlit API Exception, we pass the disabled state directly
         
         st.subheader("Manual Word & All Content Entry")
         with st.form(key="manual_word_form"):

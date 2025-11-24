@@ -131,8 +131,8 @@ def initialize_session_state():
     if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None
     if 'autotask_status' not in st.session_state: st.session_state.autotask_status = 'Idle' 
     
-    # CRITICAL FIX: UI Draw Guard
-    if 'is_running_ui_draw' not in st.session_state: st.session_state.is_running_ui_draw = False
+    # CRITICAL: Flag to prevent auto-task from firing on the immediate run after login
+    if 'initial_auth_rerun_done' not in st.session_state: st.session_state.initial_auth_rerun_done = False 
 
     # LAZY LOADING STATE MANAGEMENT
     if 'has_more_data' not in st.session_state: st.session_state.has_more_data = True
@@ -317,9 +317,8 @@ class LongRunningTaskController:
             st.session_state.task_thread = None
 
     def _update_session_state(self, status: str, message: str, running: bool):
-        # CRITICAL FIX: Add a brief wait here if the UI is actively drawing
-        if st.session_state.is_running_ui_draw:
-             time.sleep(0.5) # Wait for half a second before changing state and rerunning
+        # REMOVED: is_running_ui_draw check. This logic is too complex for this environment.
+        # We rely only on the `initial_auth_rerun_done` guard and the UI structure now.
 
         st.session_state.autotask_status = status
         st.session_state.autotask_message = message
@@ -627,8 +626,8 @@ def handle_auth(email: str, password: str):
     st.session_state.vocab_data = None
     st.session_state.has_more_data = True
     st.session_state.total_word_count = 0
-    st.session_state.auto_fetch_triggered = False # Reset flag on new login
-
+    st.session_state.auto_fetch_triggered = False 
+    st.session_state.initial_auth_rerun_done = False # Reset flag on new login
     st.rerun()
     
 def handle_logout():
@@ -642,6 +641,7 @@ def handle_logout():
     st.session_state.has_more_data = True
     st.session_state.total_word_count = 0
     st.session_state.auto_fetch_triggered = False
+    st.session_state.initial_auth_rerun_done = False
     st.rerun()
     
 def manual_refresh_callback():
@@ -988,9 +988,6 @@ def admin_extraction_ui():
     
     is_task_running = st.session_state.autotask_running
     
-    # CRITICAL FIX: Set UI Draw Guard ON
-    st.session_state.is_running_ui_draw = True
-    
     # Placeholder for the interactive form/buttons
     interactive_container = st.empty()
     
@@ -1056,8 +1053,7 @@ def admin_extraction_ui():
                 # This is the line that caused the crash, now rendered only in the non-running path.
                 st.form_submit_button("Force Reload Data from DB", key="btn_force_reload_form", type="danger", on_click=manual_refresh_callback)
     
-    # CRITICAL FIX: Set UI Draw Guard OFF immediately after rendering logic completes
-    st.session_state.is_running_ui_draw = False
+    # We remove the is_running_ui_draw flags entirely since the strict initialization guard handles the race condition.
 
 
 # ======================================================================
@@ -1098,13 +1094,17 @@ def main():
         
         # 1. Load initial data if it hasn't been loaded yet (vocab_data is None)
         if st.session_state.vocab_data is None:
-            # Spinner shown while fetching the count and first batch (even if count is 0)
             with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
                 load_and_update_vocabulary_data()
-            st.rerun() # Trigger rerun immediately after loading is done to update UI
-        
-        # 2. AUTOMATIC DATA FETCHING/FIXING LOGIC (Admin Only, runs after load)
-        if st.session_state.is_admin and st.session_state.initial_load_done and not st.session_state.autotask_running and not st.session_state.auto_fetch_triggered:
+            
+            # CRITICAL FIX: If this is the *first* run after login, flag it and RERUN immediately.
+            # This ensures the UI gets a chance to stabilize after auth before auto-tasks fire.
+            if not st.session_state.initial_auth_rerun_done:
+                 st.session_state.initial_auth_rerun_done = True
+                 st.rerun()
+            
+        # 2. AUTOMATIC DATA FETCHING/FIXING LOGIC (Admin Only, runs on the SECOND run after load)
+        if st.session_state.is_admin and st.session_state.initial_load_done and st.session_state.initial_auth_rerun_done and not st.session_state.autotask_running and not st.session_state.auto_fetch_triggered:
             
             # If database is nearly empty, automatically start bulk extraction of 25 words
             if st.session_state.total_word_count < AUTO_FETCH_THRESHOLD:

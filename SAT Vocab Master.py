@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 import pandas as pd # Required for reading SQL results
 import sqlalchemy # Required by st.connection('sql')
 # Import specific error type from SQLAlchemy
-from sqlalchemy.exc import IntegrityError, ProgrammingError 
+from sqlalchemy.exc import IntegrityError, ProgrammingError, OperationalError
 
 # --- EXTERNAL API IMPORTS ---
 try:
@@ -69,6 +69,32 @@ class SatWord(BaseModel):
 # 2. SETUP & INITIALIZATION (Neon/PostgreSQL Client)
 # ======================================================================
 
+def create_table_if_not_exists(conn):
+    """Creates the vocabulary table with sufficiently wide columns if it doesn't exist."""
+    sql_create = f"""
+    CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
+        word VARCHAR(100) PRIMARY KEY,
+        pronunciation VARCHAR(100),
+        definition VARCHAR(500), 
+        tip VARCHAR(500),         
+        usage VARCHAR(1000),      
+        sat_level VARCHAR(50),
+        audio_base64 TEXT,        -- Use TEXT for large base64 audio data
+        created_at DOUBLE PRECISION,
+        briefing_text TEXT,       -- Use TEXT for large briefing text
+        briefing_audio_base64 TEXT
+    );
+    """
+    try:
+        with conn.session as s:
+            s.execute(sql_create)
+            s.commit()
+        st.success(f"✅ Table '{TABLE_NAME}' structure verified/created with wide columns.")
+    except Exception as e:
+        st.error(f"🔴 FAILED to create or verify table structure: {e}")
+        st.stop()
+
+
 @st.cache_resource
 def initialize_db_connection():
     """Initializes and returns the Streamlit SQL connection object."""
@@ -76,20 +102,20 @@ def initialize_db_connection():
         # Uses the URL from [connections.neon_db] in secrets.toml
         conn = st.connection("neon_db", type="sql")
         
-        # Test connectivity and table existence
+        # 1. Ensure connectivity and proper table structure
+        create_table_if_not_exists(conn)
+        
+        # 2. Test query (optional check)
         conn.query(f"SELECT 'success' FROM {TABLE_NAME} LIMIT 1;", ttl=0)
         
-        st.success("✅ Database connection (Neon/PostgreSQL) initialized and table found.")
         return conn
     
+    except OperationalError as e:
+        st.error(f"🔴 DATABASE CONNECTION FAILED (Operational): {e}. Check your secrets.toml URL and network.")
+        st.stop()
     except Exception as e:
-        if "relation" in str(e) and "does not exist" in str(e):
-            st.error(f"🔴 DATABASE TABLE MISSING: Table '{TABLE_NAME}' does not exist in Neon.")
-            st.warning("ACTION: Please create the table in your Neon dashboard.")
-            st.stop()
-        else:
-            st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}.")
-            st.stop()
+        st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}.")
+        st.stop()
 
 # Global database connection object
 try:

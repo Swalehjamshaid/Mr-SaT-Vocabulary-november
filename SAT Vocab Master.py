@@ -975,20 +975,20 @@ def admin_extraction_ui():
     """Renders the Admin Extraction and User Management feature."""
     st.header("💡 Data Tools", divider="orange") 
     
-    if not st.session_state.is_admin: st.warning("You must be logged in as the Admin to use this tool."); return
+    if not st.session_state.is_admin: 
+        st.warning("You must be logged in as the Admin to use this tool.")
+        return
     
-    # Check the current status of the background task
     is_task_running = st.session_state.autotask_running
     
-    # --- CRITICAL FIX: Conditional Rendering ---
-    # We define a container/placeholder to hold the buttons
-    # Then we check if the task is running. If it is, we show a loading spinner instead of the buttons.
-    # If it is NOT running, we draw the buttons using the original (non-disabled) handlers.
+    # --- CRITICAL FIX: Conditional Rendering using st.empty() to control visibility ---
     
-    button_container = st.empty()
+    # Placeholder for the interactive form/buttons
+    interactive_container = st.empty()
     
     if is_task_running:
-        with button_container.container():
+        # 1. Show only status/disabled components in the placeholder if a task is running
+        with interactive_container.container():
              st.info("🛑 **A Background Task is Running!** Data manipulation buttons are currently inactive. Check the **Application Status Board** for progress.")
              st.markdown("---")
              st.subheader("Manual Word & All Content Entry")
@@ -1002,13 +1002,14 @@ def admin_extraction_ui():
              st.button("Force Reload Data from DB", key="btn_force_reload_disp", type="danger", disabled=True)
         return
         
-    # --- IF TASK IS NOT RUNNING: Render the interactive buttons and forms ---
-    with button_container.container():
+    # 2. If no task is running, render the full interactive UI in the placeholder
+    with interactive_container.container():
         
         # --- MANUAL WORD ENTRY (Synchronous) ---
         st.subheader("Manual Word & All Content Entry")
         with st.form(key="manual_word_form", clear_on_submit=False):
-            manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input").strip()
+            # This input uses a key that only exists when the task is NOT running
+            manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_active").strip()
             manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
             if manual_submit: 
                 handle_manual_word_entry(manual_word)
@@ -1042,6 +1043,7 @@ def admin_extraction_ui():
         st.markdown("---")
         st.subheader("Manual Data Refresh (Cache Bust)")
         
+        # The specific button causing the error is now rendered only when is_task_running is False
         st.button("Force Reload Data from DB", key="btn_force_reload", type="danger", on_click=manual_refresh_callback)
 
 

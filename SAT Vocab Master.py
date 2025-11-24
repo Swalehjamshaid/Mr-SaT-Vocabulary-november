@@ -12,17 +12,18 @@ from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 from pydantic import BaseModel, Field
-# Import necessary status codes for robust error checking
-from gotrue.errors import AuthApiError
-from postgrest.exceptions import APIError as PostgrestAPIError
 
 # --- EXTERNAL API IMPORTS ---
 try:
+    # Supabase Client Import (Supabase is the database used)
     from supabase import create_client, Client as SupabaseClient
+    # REMOVED: Specific imports like 'from gotrue.errors import AuthApiError' 
+    # and 'from postgrest.exceptions import APIError' to fix ModuleNotFoundError.
+    # We will rely on the base 'Exception' handler instead.
 except ImportError:
     st.error("SUPABASE ERROR: The required library 'supabase' is likely missing. Please install it.")
     st.stop()
-
+# ... (rest of imports remain the same) ...
 try:
     from gtts import gTTS
 except ImportError:
@@ -42,7 +43,6 @@ except ImportError:
 # ======================================================================
 
 # --- Database Constants ---
-# Defined outside initialization to be accessible globally
 TABLE_NAME: str = "sat_vocabulary" 
 
 # --- App State and Constants (UNCHANGED) ---
@@ -80,23 +80,21 @@ class SatWord(BaseModel):
 def initialize_db_client() -> Optional[SupabaseClient]:
     """Initializes the database client (Supabase) using Streamlit secrets."""
     try:
-        # Fetch URL and Key from the secrets file
         url = st.secrets["database_client"]["SUPABASE_URL"]
         key = st.secrets["database_client"]["SUPABASE_KEY"]
         
         client: SupabaseClient = create_client(url, key)
         
-        # Test connectivity and table existence with specific error handling
+        # Test connectivity and table existence
         try:
             client.from_(TABLE_NAME).select("word").limit(1).execute() 
-        except PostgrestAPIError as e:
+        except Exception as e: # Catch all errors, including PostgrestAPIError
             if "not find the table" in str(e):
                 st.error(f"🔴 DATABASE TABLE MISSING: Could not find table '{TABLE_NAME}'.")
                 st.warning("ACTION: Please create the table in your Supabase dashboard or check the `TABLE_NAME` variable in the Python code.")
-                # We return None instead of stopping, allowing the app to render the error
                 return None
             else:
-                 raise e # Raise other API errors
+                 raise e 
         
         st.success("✅ Database client (Supabase) initialized and connected.")
         return client
@@ -131,12 +129,8 @@ if db_client is None:
 
 
 # ======================================================================
-# 3. CORE UTILITIES & LAZY LOADING (Implementation uses db_client)
+# 3. CORE UTILITIES & LAZY LOADING
 # ======================================================================
-
-# ... (The rest of the functions like initialize_session_state, get_total_word_count, 
-# fetch_vocabulary_batch, save_word_to_db, update_word_in_db, etc., remain exactly 
-# as provided in the last response, using the db_client variable.)
 
 def initialize_session_state():
     """Sets up default session state variables."""
@@ -250,7 +244,6 @@ def go_to_prev_page():
 def save_word_to_db(word_data: Dict) -> bool:
     """Adds a single word document to the database."""
     try:
-        # Supabase implementation of save
         db_client.from_(TABLE_NAME).insert(word_data).execute()
         return True
     except Exception as e:
@@ -260,7 +253,6 @@ def save_word_to_db(word_data: Dict) -> bool:
 def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
     """Updates specific fields of a word document in the database by word name."""
     try:
-        # Supabase implementation of update: filters by 'word' and updates fields
         db_client.from_(TABLE_NAME).update(fields_to_update).eq('word', word_data['word']).execute()
         return True
     except Exception as e:

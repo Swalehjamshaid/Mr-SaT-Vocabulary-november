@@ -254,7 +254,7 @@ def go_to_prev_page():
 # --- Database Write Operations (SQL Implementation) ---
 
 def save_word_to_db(word_data: Dict) -> bool:
-    """Adds a single word document to the database using SQL, with improved error reporting."""
+    """Adds a single word document to the database using SQL, with improved error reporting and atomic commit."""
     try:
         columns = ', '.join(word_data.keys())
         values_placeholders = ', '.join([f':{key}' for key in word_data.keys()])
@@ -264,9 +264,10 @@ def save_word_to_db(word_data: Dict) -> bool:
             VALUES ({values_placeholders});
         """
         with db_conn.session as s:
-            # FIX: Use text() for INSERT for stability
+            # Execute the insert statement
             s.execute(text(sql_insert), params=word_data)
-            s.commit()
+            # CRITICAL: Commit immediately to ensure the word is saved atomically
+            s.commit() 
         return True
     except IntegrityError as e:
         # Catch errors related to UNIQUE constraints (duplicates) or NOT NULL constraints
@@ -287,7 +288,7 @@ def save_word_to_db(word_data: Dict) -> bool:
         return False
         
 def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
-    """Updates specific fields of a word document using SQL, with improved error reporting."""
+    """Updates specific fields of a word document using SQL, with improved error reporting and atomic commit."""
     try:
         with db_conn.session as s:
             set_clauses = [f"{key} = :{key}" for key in fields_to_update.keys()]
@@ -300,6 +301,7 @@ def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
             """
             # FIX: Use text() for UPDATE for stability
             s.execute(text(sql_update), params=params)
+            # CRITICAL: Commit immediately to ensure the update is saved atomically
             s.commit()
         return True
     except IntegrityError as e:
@@ -315,7 +317,7 @@ def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
     except Exception as e:
         error_msg = f"DB Update Failed for {word_data.get('word', 'N/A')}: {e}"
         print(f"🔴 {error_msg}")
-        st.error(f"🔴 Unknown DB Update Error: {error_msg}")
+        st.error(f"🔴 Unknown DB Update Error: {e}")
         return False
 
 # --- Core Utilities (UNCHANGED) ---
@@ -412,8 +414,7 @@ def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
             for word_data in enriched_words:
                 if save_word_to_db(word_data):
                     successful_saves += 1
-                # If save_word_to_db returns False (due to Integrity/Schema error), 
-                # we skip and continue the loop, preventing the full batch failure.
+                # The word is saved atomically in save_word_to_db, so we continue the loop even if one fails.
         
         st.session_state.autotask_message = f"✅ Success! Extracted and saved {successful_saves} words."
         st.session_state.vocab_data = None # Force full data reload
@@ -435,19 +436,15 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
         generated_count = 0
         
         # Fetch data directly from DB to ensure we have the absolute latest state
-        # MODIFICATION: Re-fetch the words to be processed from the database directly,
-        # not just relying on the potentially stale session state.
+        # Filter is in the SQL query: WHERE briefing_audio_base64 IS NULL
         words_to_process_db = db_conn.query(
-            f"SELECT * FROM {TABLE_NAME} ORDER BY created_at ASC LIMIT {batch_size} OFFSET {batch_indices[0]};", ttl=0
+            f"SELECT * FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NULL ORDER BY created_at ASC LIMIT {batch_size};", ttl=0
         ).to_dict('records')
 
-        words_to_process = [
-            word_data for word_data in words_to_process_db 
-            if not word_data.get('briefing_audio_base64')
-        ]
+        words_to_process = words_to_process_db 
         
         if not words_to_process:
-            st.session_state.autotask_message = "All requested words already have briefings in the DB."
+            st.session_state.autotask_message = "All requested words already have briefings in the DB. Auto-maintenance complete."
             st.rerun()
             return
             
@@ -460,20 +457,17 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
                 
                 if briefing_content:
                     # Update only the briefing fields in the database
-                    if update_word_in_db(word_data, briefing_content):
-                         # Note: We update session state, but the primary indicator of success is the DB update
-                         # We'll rely on the final data load to correct the full session state.
+                    if update_word_in_db(word_data, briefing_content): # <--- This updates one word at a time atomically
                          generated_count += 1
                          
         # MODIFICATION: Force a full data reload after the batch update to ensure the UI reflects changes
         st.session_state.vocab_data = None
         st.session_state.total_word_count = get_total_word_count()
 
-        remaining_db = st.session_state.total_word_count - len(
-            db_conn.query(f"SELECT * FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NOT NULL;", ttl=0).to_dict('records')
-        )
+        # Check remaining count directly from DB
+        remaining_briefings = get_words_missing_briefing_count()
         
-        st.session_state.autotask_message = f"✅ Briefing batch completed: {generated_count} processed. {remaining_db} remaining in DB."
+        st.session_state.autotask_message = f"✅ Briefing batch completed: {generated_count} processed. {remaining_briefings} remaining in DB."
              
         st.rerun()
              
@@ -483,6 +477,47 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
     finally:
         status_placeholder.empty()
 
+# New function to get the number of words missing a briefing (used for maintenance check)
+def get_words_missing_briefing_count() -> int:
+    """Fetches the count of words that do not have briefing audio data."""
+    try:
+        result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NULL;", ttl=0)
+        return int(result.iloc[0, 0])
+    except Exception:
+        return 0
+
+
+# New function for autonomous maintenance logic
+def run_auto_maintenance_sync():
+    """Checks goals and executes the next batch task synchronously if needed."""
+    
+    total_words = get_total_word_count()
+    
+    # Priority 1: Generate new words if target is not met
+    if total_words < REQUIRED_WORD_COUNT:
+        # Execute the word extraction task
+        st.session_state.autotask_message = f"Running Auto-Extraction: Target {REQUIRED_WORD_COUNT}. Current {total_words}."
+        
+        # We need to run the extraction synchronously and let it trigger the rerun
+        handle_admin_extraction_button(num_words=AUTO_FETCH_BATCH, auto_fetch=True)
+        return
+        
+    # Priority 2: Generate missing briefings for existing words
+    missing_briefings = get_words_missing_briefing_count()
+    if missing_briefings > 0:
+        # Execute the briefing generation task
+        st.session_state.autotask_message = f"Running Auto-Briefing: {missing_briefings} briefings needed."
+        
+        # We create a small batch of indices for the briefing function to process
+        # We use [0] as a placeholder since the filtering is done in the SQL query inside the helper function
+        batch_indices = [0] 
+        
+        _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=AUTO_FETCH_BATCH)
+        return
+        
+    # If both goals are met
+    st.session_state.autotask_message = "Auto-Maintenance Complete. Target 2000 words reached with all briefings."
+    st.session_state.auto_fetch_triggered = True # Mark as complete
 
 # ======================================================================
 # 5. HANDLERS (Synchronous)
@@ -530,10 +565,6 @@ def handle_manual_word_entry(word: str):
 
 def auto_generate_briefings_manual(batch_size: int):
     """Manually triggers a large batch generation of missing briefing content (Synchronous)."""
-    
-    # MODIFICATION: Changed how we find the batch indices to be more robust
-    # Instead of relying on RAM index, we just try to process the first batch_size records
-    # starting from the beginning. The inner function will filter based on DB status.
     
     # We load the entire data set to get the total count for processing.
     if st.session_state.vocab_data is None:
@@ -677,8 +708,11 @@ def data_board_ui():
     word_count = st.session_state.total_word_count
     
     # Calculate missing briefings only if data is loaded
-    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')]) if st.session_state.vocab_data else 0
+    missing_briefing_count_ram = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')]) if st.session_state.vocab_data else 0
     loaded_count = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
+    
+    # MODIFICATION: Use the new DB counter for accurate status
+    missing_briefing_count_db = get_words_missing_briefing_count() 
 
     st.header("📊 Application Status Board")
     
@@ -689,7 +723,7 @@ def data_board_ui():
     with cols[1]:
         st.metric(label="Words Loaded (RAM)", value=loaded_count) 
     with cols[2]:
-        st.metric(label="Words Missing Briefing", value=missing_briefing_count)
+        st.metric(label="Words Missing Briefing", value=missing_briefing_count_db)
     with cols[3]:
         status_message = st.session_state.get('autotask_message', "System Idle.")
         
@@ -1015,7 +1049,8 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     
     if st.session_state.vocab_data:
         missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-        missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+        # MODIFICATION: Use the DB count for accurate display
+        missing_briefing_count = get_words_missing_briefing_count() 
     else: missing_audio_count = 0; missing_briefing_count = 0
             
     container.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
@@ -1110,18 +1145,11 @@ def main():
                  st.session_state.initial_auth_rerun_done = True
                  st.rerun() # Ensure UI updates with loaded count
 
-        # 2. AUTOMATIC DATA FETCHING/FIXING LOGIC (Synchronous check on rerun)
-        if st.session_state.is_admin and st.session_state.initial_load_done and st.session_state.initial_auth_rerun_done and not st.session_state.auto_fetch_triggered:
-            
-            # If database is nearly empty, automatically start bulk extraction of 25 words
-            if st.session_state.total_word_count < AUTO_FETCH_THRESHOLD:
-                st.session_state.auto_fetch_triggered = True 
-                
-                # EXECUTE SYNCHRONOUSLY, blocking the UI
-                handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
-            
-            # If database is populated, check for and generate missing briefings
-            # This logic remains in the code but is simplified to the manual trigger for stability.
+        # 2. AUTOMATIC MAINTENANCE LOGIC (Continuous Check on Rerun)
+        # MODIFICATION: Replaced old auto-fetch logic with the new continuous maintenance task.
+        if st.session_state.is_admin and st.session_state.initial_load_done and st.session_state.initial_auth_rerun_done:
+            # Run the unified auto-maintenance task if admin is logged in
+            run_auto_maintenance_sync()
 
         # --- Display Core UI ---
         data_board_ui()

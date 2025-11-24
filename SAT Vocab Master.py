@@ -317,9 +317,7 @@ class LongRunningTaskController:
             st.session_state.task_thread = None
 
     def _update_session_state(self, status: str, message: str, running: bool):
-        # REMOVED: is_running_ui_draw check. This logic is too complex for this environment.
         # We rely only on the `initial_auth_rerun_done` guard and the UI structure now.
-
         st.session_state.autotask_status = status
         st.session_state.autotask_message = message
         st.session_state.autotask_running = running
@@ -646,8 +644,8 @@ def handle_logout():
     
 def manual_refresh_callback():
     """Callback function for the Force Reload Data button."""
+    # This handler is now tied to a button outside the problematic form
     if st.session_state.autotask_running:
-        # Crucial check inside handler to block execution if thread is running
         st.warning("Cannot refresh data while a background task is running.")
         return
     st.session_state.vocab_data = None 
@@ -1048,10 +1046,11 @@ def admin_extraction_ui():
                 st.form_submit_button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_form", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
 
                 st.markdown("---")
-                st.subheader("Manual Data Refresh (Cache Bust)")
-                
-                # This is the line that caused the crash, now rendered only in the non-running path.
-                st.form_submit_button("Force Reload Data from DB", key="btn_force_reload_form", type="danger", on_click=manual_refresh_callback)
+            
+            # CRITICAL FIX: The previously crashing button is moved *outside* the internal form 
+            # and is rendered as a clean st.button. The state guard in main() should have stabilized this.
+            st.subheader("Manual Data Refresh (Cache Bust)")
+            st.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
     
     # We remove the is_running_ui_draw flags entirely since the strict initialization guard handles the race condition.
 
@@ -1093,12 +1092,14 @@ def main():
     if st.session_state.is_auth:
         
         # 1. Load initial data if it hasn't been loaded yet (vocab_data is None)
+        # This occurs on the first run after login.
         if st.session_state.vocab_data is None:
             with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
                 load_and_update_vocabulary_data()
             
             # CRITICAL FIX: If this is the *first* run after login, flag it and RERUN immediately.
-            # This ensures the UI gets a chance to stabilize after auth before auto-tasks fire.
+            # This ensures the UI gets a chance to stabilize (drawing all widgets) before auto-tasks fire 
+            # and prevents the race condition crash.
             if not st.session_state.initial_auth_rerun_done:
                  st.session_state.initial_auth_rerun_done = True
                  st.rerun()

@@ -43,7 +43,7 @@ LOAD_BATCH_SIZE = 10
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25
-BRIEFING_BATCH_SIZE = 10 
+BRIEFING_BATCH_SIZE = 10 # Batch size for fixing missing briefings
 MANUAL_BRIEFING_BATCH = 50 
 MANUAL_EXTRACT_BATCH = 50
 
@@ -271,9 +271,12 @@ def save_word_to_db(word_data: Dict) -> bool:
         return True
     except IntegrityError as e:
         # Catch errors related to UNIQUE constraints (duplicates) or NOT NULL constraints
-        error_msg = f"DB Integrity Error: Word '{word_data.get('word', 'N/A')}' likely violates a UNIQUE or NOT NULL constraint. Details: {e.orig}"
-        print(f"🔴 {error_msg}")
-        st.error(error_msg)
+        error_msg = f"DB Integrity Error: Word '{word_data.get('word', 'N/A')}' likely violates a UNIQUE or NOT NULL constraint. Duplicate key value violates unique constraint \"sat_vocabulary_pkey\"."
+        
+        # MODIFICATION: Suppress the large red box in the UI for expected duplicate errors. 
+        # We still print the error to the console for debugging, but don't clutter the UI.
+        # st.error(error_msg) 
+        print(f"🔴 DUPLICATE WORD SKIPPED: {error_msg}")
         return False
     except ProgrammingError as e:
         # Catch errors related to schema mismatch (e.g., string too long for VARCHAR)
@@ -369,6 +372,16 @@ def generate_full_briefing_content(word_data: Dict) -> Optional[Dict]:
 # 4. SYNCHRONOUS TASK CONTROLLER
 # ======================================================================
 
+def get_all_existing_words_from_db() -> List[str]:
+    """Fetches all words currently saved in the DB for the exclusion list."""
+    try:
+        # Fetch only the 'word' column, which is fast
+        df = db_conn.query(f"SELECT word FROM {TABLE_NAME};", ttl=0)
+        return df['word'].tolist()
+    except Exception as e:
+        print(f"🔴 Failed to fetch all existing words: {e}")
+        return []
+
 def _enrich_word_sync(word_data: Dict) -> Dict:
     """Helper to generate audio and briefing content for a single word (Synchronous)."""
     # 1. Pronunciation Audio
@@ -387,8 +400,12 @@ def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
     status_placeholder = st.empty()
     
     try:
+        # MODIFICATION: Use the most accurate word list from DB right before API call
+        # This addresses the data lag issue that causes the duplicate errors.
+        current_existing_words = get_all_existing_words_from_db()
+        
         with st.spinner(f"Step 1/3: Requesting {num_words} words from Gemini..."):
-            prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
+            prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(current_existing_words) if current_existing_words else 'none'}."
             list_schema = {"type": "array", "items": SatWord.model_json_schema()}
             config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
             
@@ -492,27 +509,25 @@ def run_auto_maintenance_sync():
     """Checks goals and executes the next batch task synchronously if needed."""
     
     total_words = get_total_word_count()
+    missing_briefings = get_words_missing_briefing_count()
     
-    # Priority 1: Generate new words if target is not met
+    # Priority 1: Fix missing briefings (BRIEFING_BATCH_SIZE is small, so this is quick)
+    if missing_briefings > 0:
+        # Execute the briefing generation task
+        st.session_state.autotask_message = f"Running Auto-Briefing: {missing_briefings} briefings needed."
+        
+        # We process a small batch (BRIEFING_BATCH_SIZE) to quickly make words usable
+        batch_indices = [0] 
+        _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=BRIEFING_BATCH_SIZE)
+        return
+        
+    # Priority 2: Generate new words if target is not met
     if total_words < REQUIRED_WORD_COUNT:
         # Execute the word extraction task
         st.session_state.autotask_message = f"Running Auto-Extraction: Target {REQUIRED_WORD_COUNT}. Current {total_words}."
         
         # We need to run the extraction synchronously and let it trigger the rerun
         handle_admin_extraction_button(num_words=AUTO_FETCH_BATCH, auto_fetch=True)
-        return
-        
-    # Priority 2: Generate missing briefings for existing words
-    missing_briefings = get_words_missing_briefing_count()
-    if missing_briefings > 0:
-        # Execute the briefing generation task
-        st.session_state.autotask_message = f"Running Auto-Briefing: {missing_briefings} briefings needed."
-        
-        # We create a small batch of indices for the briefing function to process
-        # We use [0] as a placeholder since the filtering is done in the SQL query inside the helper function
-        batch_indices = [0] 
-        
-        _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=AUTO_FETCH_BATCH)
         return
         
     # If both goals are met
@@ -527,7 +542,8 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
     """Triggers the bulk word extraction (Synchronous)."""
     
     # Pass existing words to LLM to avoid generating duplicates
-    existing_words = [d['word'] for d in st.session_state.vocab_data if st.session_state.vocab_data]
+    # NOTE: The actual exclusion list is now fetched inside _extract_and_save_batch_sync
+    existing_words = [] 
     
     _extract_and_save_batch_sync(num_words=num_words, existing_words=existing_words)
     

@@ -273,9 +273,8 @@ def save_word_to_db(word_data: Dict) -> bool:
         # Catch errors related to UNIQUE constraints (duplicates) or NOT NULL constraints
         error_msg = f"DB Integrity Error: Word '{word_data.get('word', 'N/A')}' likely violates a UNIQUE or NOT NULL constraint. Duplicate key value violates unique constraint \"sat_vocabulary_pkey\"."
         
-        # MODIFICATION: Suppress the large red box in the UI for expected duplicate errors. 
+        # FIX: Suppress the large red box in the UI for expected duplicate errors. 
         # We still print the error to the console for debugging, but don't clutter the UI.
-        # st.error(error_msg) 
         print(f"🔴 DUPLICATE WORD SKIPPED: {error_msg}")
         return False
     except ProgrammingError as e:

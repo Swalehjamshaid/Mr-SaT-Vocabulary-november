@@ -15,10 +15,10 @@ from pydantic import BaseModel, Field
 
 # --- EXTERNAL API IMPORTS ---
 try:
-    # Supabase Client Import (REMAINS)
+    # Supabase Client Import (Supabase is the database used)
     from supabase import create_client, Client as SupabaseClient
 except ImportError:
-    st.error("SUPABASE ERROR: The required library 'supabase-py' is likely missing. Please install it.")
+    st.error("SUPABASE ERROR: The required library 'supabase' is likely missing. Please install it.")
     st.stop()
 
 try:
@@ -39,10 +39,8 @@ except ImportError:
 # 1. CONFIGURATION & MODELS
 # ======================================================================
 
-# --- Supabase Credentials & Constants (REMAINS) ---
-SUPABASE_URL: str = "https://hcmoeljjxlpcgoelyjqh.supabase.co"
-SUPABASE_KEY: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhjbW9lbGpqeGxwY2dvZWx5anFoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjM5NTI1ODUsImV4cCI6MjA3OTUyODU4NX0.YYDFnDMfn9UvRlJHs1nozVTe-qkOIY_habwixcCI6KM"
-TABLE_NAME: str = "sat_vocabulary" 
+# --- Database Constants ---
+TABLE_NAME: str = "sat_vocabulary" # CRITICAL: Ensure this matches your Supabase table name
 
 # --- App State and Constants (UNCHANGED) ---
 REQUIRED_WORD_COUNT = 2000 
@@ -75,21 +73,31 @@ class SatWord(BaseModel):
 # 2. SETUP & INITIALIZATION (Database and AI Clients)
 # ======================================================================
 
-# --- DATABASE CLIENT INITIALIZATION (Supabase Implementation) ---
+# --- DATABASE CLIENT INITIALIZATION (Supabase Implementation via Secrets) ---
 @st.cache_resource
 def initialize_db_client() -> SupabaseClient:
-    """Initializes the database client (Supabase)."""
+    """Initializes the database client (Supabase) using Streamlit secrets."""
     try:
-        client: SupabaseClient = create_client(SUPABASE_URL, SUPABASE_KEY)
+        # Fetch URL and Key from the secrets file
+        url = st.secrets["database_client"]["SUPABASE_URL"]
+        key = st.secrets["database_client"]["SUPABASE_KEY"]
+        
+        client: SupabaseClient = create_client(url, key)
+        
+        # Test connectivity by attempting a small query
         client.from_(TABLE_NAME).select("word").limit(1).execute() 
+        
         st.success("✅ Database client (Supabase) initialized and connected.")
         return client
+        
+    except KeyError as e:
+        st.error(f"🔴 CONFIGURATION ERROR: Missing secret key {e} under [database_client]. Please update secrets.toml.")
+        st.stop()
     except Exception as e:
-        st.error(f"🔴 DATABASE INITIALIZATION FAILED. Root Cause: {e}. Check your URL, Key, and table name ('{TABLE_NAME}').")
+        st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}. Check URL, Key, and table name ('{TABLE_NAME}').")
         st.stop()
 
 try:
-    # RENAMED VARIABLE
     db_client = initialize_db_client()
 except Exception:
     st.stop()
@@ -105,13 +113,12 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-
 # ======================================================================
-# 3. CORE UTILITIES & LAZY LOADING (Supabase Implementation)
+# 3. CORE UTILITIES & LAZY LOADING
 # ======================================================================
 
 def initialize_session_state():
-    # ... (Initialization logic - unchanged) ...
+    """Sets up default session state variables."""
     if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
     if 'is_auth' not in st.session_state: st.session_state.is_auth = False
     if 'vocab_data' not in st.session_state: st.session_state.vocab_data = None 
@@ -133,9 +140,8 @@ def initialize_session_state():
     if 'total_word_count' not in st.session_state: st.session_state.total_word_count = 0
 
 
-# RENAMED FUNCTION
 def get_total_word_count() -> int:
-    """Fetches the total document count using the database client."""
+    """Fetches the total document count using the database client (Supabase)."""
     try:
         # Supabase implementation of total count
         response = db_client.from_(TABLE_NAME).select("count", count="exact").limit(0).execute()
@@ -144,15 +150,13 @@ def get_total_word_count() -> int:
         print(f"🔴 DB Count Failed: {e}")
         return len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
 
-
-# RENAMED FUNCTION
 def fetch_vocabulary_batch(offset: int) -> List[Dict]:
     """Fetches the next batch of words using offset-based pagination."""
     start_index = offset
     end_index = offset + LOAD_BATCH_SIZE - 1
     
     try:
-        # Supabase implementation of batch fetch
+        # Supabase implementation of batch fetch: ordered by creation time
         response = (
             db_client.from_(TABLE_NAME)
             .select("*")
@@ -169,13 +173,9 @@ def load_and_update_vocabulary_data():
     """Loads the INITIAL batch of data and calculates the total count."""
     if not st.session_state.is_auth or st.session_state.vocab_data is not None: return
 
-    # 1. Fetch Total Count (RENAMED CALL)
     st.session_state.total_word_count = get_total_word_count()
-    
-    # 2. Fetch Initial Batch (RENAMED CALL)
     vocab_list = fetch_vocabulary_batch(offset=0)
     
-    # 3. Update State
     st.session_state.vocab_data = vocab_list
     st.session_state.initial_load_done = True
     
@@ -197,13 +197,11 @@ def fetch_and_append_next_batch():
         return
 
     offset = len(st.session_state.vocab_data)
-    # RENAMED CALL
     next_batch = fetch_vocabulary_batch(offset=offset)
     
     if next_batch:
         st.session_state.vocab_data.extend(next_batch)
         st.session_state.has_more_data = len(next_batch) == LOAD_BATCH_SIZE
-        # RENAMED CALL
         st.session_state.total_word_count = get_total_word_count() 
         st.success(f"Loaded {len(next_batch)} more words.")
     else:
@@ -214,7 +212,6 @@ def fetch_and_append_next_batch():
 
 # --- Pagination Logic (UNCHANGED) ---
 def go_to_next_page():
-    # ... (Logic unchanged) ...
     total_loaded = len(st.session_state.vocab_data)
     max_index = (total_loaded // LOAD_BATCH_SIZE) - 1
     current_index = st.session_state.current_page_index
@@ -231,7 +228,6 @@ def go_to_prev_page():
 
 # --- Database Write Operations ---
 
-# RENAMED FUNCTION
 def save_word_to_db(word_data: Dict) -> bool:
     """Adds a single word document to the database."""
     try:
@@ -242,11 +238,10 @@ def save_word_to_db(word_data: Dict) -> bool:
         print(f"🔴 DB Save Failed for {word_data['word']}: {e}")
         return False
         
-# RENAMED FUNCTION
 def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
     """Updates specific fields of a word document in the database by word name."""
     try:
-        # Supabase implementation of update
+        # Supabase implementation of update: filters by 'word' and updates fields
         db_client.from_(TABLE_NAME).update(fields_to_update).eq('word', word_data['word']).execute()
         return True
     except Exception as e:
@@ -255,7 +250,6 @@ def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
 
 # --- Core Utilities (UNCHANGED) ---
 def generate_tts_audio(text: str) -> Optional[str]:
-    # ... (TTS Generation - unchanged) ...
     if not text: return None
     try:
         tts = gTTS(text=text, lang='en', slow=False)
@@ -269,7 +263,6 @@ def generate_tts_audio(text: str) -> Optional[str]:
         return None
 
 def generate_full_briefing_content(word_data: Dict) -> Optional[Dict]:
-    # ... (Briefing LLM/TTS Generation - unchanged) ...
     word = word_data.get('word', 'a high-level word')
     definition = word_data.get('definition', 'a complex meaning')
     
@@ -301,11 +294,12 @@ def generate_full_briefing_content(word_data: Dict) -> Optional[Dict]:
 
 
 # ======================================================================
-# 4. ASYNCHRONOUS TASK CONTROLLER (Uses Renamed DB Functions)
+# 4. ASYNCHRONOUS TASK CONTROLLER
 # ======================================================================
 
 class LongRunningTaskController:
-    # ... (Logic unchanged) ...
+    """Manages all long-running AI and I/O tasks in a separate thread."""
+    
     def __init__(self):
         if 'task_thread' not in st.session_state:
             st.session_state.task_thread = None
@@ -328,7 +322,6 @@ class LongRunningTaskController:
     def check_task_status(self):
         if st.session_state.autotask_running and st.session_state.task_thread and not st.session_state.task_thread.is_alive():
             
-            # RENAMED CALL
             st.session_state.total_word_count = get_total_word_count()
             st.session_state.vocab_data = None 
             st.session_state.has_more_data = True 
@@ -341,14 +334,11 @@ class LongRunningTaskController:
     # --- THREAD TARGET FUNCTIONS ---
     def _extract_and_save_batch(self, num_words: int, existing_words: List[str], auto_fetch: bool):
         try:
-            # ... (LLM Extraction) ...
             st.session_state.autotask_message = f"LLM Task: Generating {num_words} structured words..."
             prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
             list_schema = {"type": "array", "items": SatWord.model_json_schema()}
             config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
-            response = gemini_client.models.generate_content(
-                model="gemini-2.5-flash", contents=prompt, config=config
-            )
+            response = gemini_client.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=config)
             new_data_list = json.loads(response.text)
             validated_words = [SatWord(**item).model_dump() for item in new_data_list if 'word' in item]
 
@@ -361,7 +351,6 @@ class LongRunningTaskController:
             st.session_state.autotask_message = f"Saving {len(enriched_words)} words to DB..."
             
             for word_data in enriched_words:
-                # RENAMED CALL
                 if save_word_to_db(word_data):
                     successful_saves += 1
             
@@ -374,7 +363,6 @@ class LongRunningTaskController:
             st.session_state.autotask_running = False
             
     def _enrich_word(self, word_data: Dict) -> Dict:
-        # ... (Helper for word enrichment - unchanged) ...
         pronunciation_audio = generate_tts_audio(word_data['word'])
         word_data['audio_base64'] = pronunciation_audio if pronunciation_audio else None
         
@@ -395,7 +383,6 @@ class LongRunningTaskController:
                     result = future.result()
                     if result:
                         word_data = future_to_word[future]
-                        # RENAMED CALL
                         if update_word_in_db(word_data, result):
                              st.session_state.vocab_data[st.session_state.vocab_data.index(word_data)].update(result)
                              generated_count += 1
@@ -414,7 +401,6 @@ class LongRunningTaskController:
             st.session_state.autotask_running = False
 
     def _enrich_briefing(self, word_data: Dict) -> Optional[Dict]:
-        # ... (Helper for briefing enrichment - unchanged) ...
         briefing_content = generate_full_briefing_content(word_data)
         if briefing_content:
             return briefing_content
@@ -427,7 +413,21 @@ task_controller = LongRunningTaskController()
 # 5. HANDLERS (Adjusted for DB Abstraction)
 # ======================================================================
 
-# ... (All other handlers and UI components use the new DB-agnostic names) ...
+def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
+    """Triggers the bulk word extraction in a background thread."""
+    if st.session_state.autotask_running:
+        st.warning("A background task is already running. Please wait.")
+        return
+
+    existing_words = [d['word'] for d in st.session_state.vocab_data if st.session_state.vocab_data]
+    
+    if task_controller.run_task_in_thread(
+        task_controller._extract_and_save_batch, 
+        num_words=num_words, 
+        existing_words=existing_words, 
+        auto_fetch=auto_fetch
+    ):
+        st.session_state.autotask_message = f"Initiated extraction of {num_words} words..."
 
 def handle_manual_word_entry(word: str):
     """Generates all content for a single word and saves it to the database."""
@@ -436,33 +436,586 @@ def handle_manual_word_entry(word: str):
     st.info(f"Generating content for '{word}'...")
     
     try:
-        # 1. Get Base Word Data via LLM (UNCHANGED)
         prompt = f"Generate the pronunciation, definition, mnemonic tip, and a usage sentence for the high-level SAT word: {word}. Return only the JSON object."
         list_schema = {"type": "array", "items": SatWord.model_json_schema()}
         config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
         response = gemini_client.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=config)
         data_list = json.loads(response.text)
         new_word_data = SatWord(**data_list[0]).model_dump()
-        
-        # 2. Enrich: Pronunciation & Briefing (UNCHANGED)
         new_word_data = task_controller._enrich_word(new_word_data)
         
     except Exception as e:
         st.error(f"🔴 Failed to generate content for '{word}'. Error: {e}"); return
 
-    # RENAMED CALL
     if save_word_to_db(new_word_data):
         st.session_state.vocab_data = None 
-        st.session_state.last_word_timestamp = None
         st.session_state.has_more_data = True
         st.session_state.total_word_count = 0
         st.success(f"✅ Successfully added '{new_word_data['word']}' with ALL content to DB! Reloading data...")
         st.rerun()
     else:
         st.error("🔴 Failed to save to DB.")
-        
-# ... (Other UI and Handler functions omitted for brevity, but they would use 
-# the renamed functions like `get_total_word_count`, `save_word_to_db`, etc.)
-# The main() function and all UI rendering logic remain structurally identical.
 
-# ... (End of script)
+def auto_generate_briefings():
+    """Admin Auto-Task for processing LEGACY words missing the 2-minute briefing."""
+    if not st.session_state.is_admin or st.session_state.autotask_running:
+        return
+
+    words_to_brief_indices = [
+        i for i, d in enumerate(st.session_state.vocab_data) 
+        if not d.get('briefing_audio_base64') 
+    ]
+    
+    if not words_to_brief_indices:
+        return
+
+    batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
+    
+    if task_controller.run_task_in_thread(
+        task_controller._generate_briefing_batch, 
+        batch_indices=batch_indices, 
+        batch_size=BRIEFING_BATCH_SIZE
+    ):
+        st.session_state.autotask_message = f"Admin Auto-Task: Generating {len(batch_indices)} LEGACY missing Briefings..."
+        
+def auto_generate_briefings_manual(batch_size: int):
+    """Manually triggers a large batch generation of missing briefing content."""
+    if st.session_state.autotask_running:
+        st.warning("A background task is already running. Please wait.")
+        return
+
+    words_to_brief_indices = [
+        i for i, d in enumerate(st.session_state.vocab_data)  
+        if not d.get('briefing_audio_base64') 
+    ]
+    
+    if not words_to_brief_indices:
+        st.session_state.autotask_message = "All words already have 2-Minute Briefing content!"
+        st.rerun()
+        return
+
+    batch_indices = words_to_brief_indices[:batch_size]
+    
+    if task_controller.run_task_in_thread(
+        task_controller._generate_briefing_batch, 
+        batch_indices=batch_indices, 
+        batch_size=batch_size
+    ):
+        st.session_state.autotask_message = f"Status: Manually starting bulk generation for {len(batch_indices)} missing briefings (Batch Size {batch_size})...."
+
+def handle_fix_single_audio(word_index: int):
+    """Generates missing pronunciation audio for a single word and updates the DB document."""
+    if word_index < 0 or word_index >= len(st.session_state.vocab_data):
+        st.error("Invalid word index."); return
+        
+    word_data = st.session_state.vocab_data[word_index]
+    word = word_data['word']
+    
+    st.info(f"Attempting to fix pronunciation for '{word}'...")
+    audio_data = generate_tts_audio(word)
+    
+    if audio_data:
+        fields_to_update = {'audio_base64': audio_data}
+        if update_word_in_db(word_data, fields_to_update):
+            st.session_state.vocab_data[word_index].update(fields_to_update)
+            st.success(f"✅ Successfully fixed audio for '{word}' and saved to DB.")
+        else:
+            st.error(f"🔴 Audio generated, but failed to save update to DB for '{word}'.")
+    else:
+        st.error(f"🔴 Failed to fix audio for '{word}'. TTS generation may still be failing.")
+    st.rerun()
+
+def handle_bulk_audio_fix():
+    """Attempts to generate and save missing pronunciation audio for all corrupted words."""
+    words_to_fix_indices = [i for i, d in enumerate(st.session_state.vocab_data) if d.get('audio_base64') is None]
+    
+    if not words_to_fix_indices: st.success("All loaded words already have pronunciation audio!"); return
+
+    status_placeholder = st.empty()
+    fixed_count = 0
+    total_count = len(words_to_fix_indices)
+
+    status_placeholder.info(f"Starting bulk fix for {total_count} corrupted words...")
+    
+    with st.spinner("Processing audio fix... this may take a moment."):
+        for i, index in enumerate(words_to_fix_indices):
+            word_data = st.session_state.vocab_data[index]
+            word = word_data['word']
+            audio_data = generate_tts_audio(word)
+    
+            if audio_data:
+                fields_to_update = {'audio_base64': audio_data}
+                if update_word_in_db(word_data, fields_to_update):
+                    st.session_state.vocab_data[index].update(fields_to_update)
+                    fixed_count += 1
+                else:
+                    st.warning(f"Audio fixed for {word}, but save to DB failed.")
+    
+    if fixed_count > 0:
+        st.session_state.total_word_count = get_total_word_count() 
+        st.success(f"✅ Bulk fix complete! Successfully repaired audio for {fixed_count} of {total_count} words.")
+    else:
+        st.error(f"🔴 Bulk fix attempted, but audio generation failed for all {total_count} words or failed to save to DB. Check server logs/quotas.")
+        
+    status_placeholder.empty()
+    st.rerun()
+
+def handle_auth(email: str, password: str):
+    """Handles Mock user registration and login."""
+    if not email or not password: st.error("Please enter both Email and Password."); return
+        
+    is_admin = (email == ADMIN_EMAIL and password == ADMIN_PASSWORD)
+    is_valid_user = is_admin or (len(password) >= 6 and '@' in email and '.' in email)
+    
+    if not is_valid_user: st.error("Invalid credentials."); return
+
+    st.session_state.current_user_email = email
+    st.session_state.is_auth = True
+    st.session_state.is_admin = is_admin
+    st.session_state.current_page_index = 0
+    st.session_state.quiz_start_index = 0
+    st.session_state.drill_word_index = 0 
+    st.session_state.autotask_message = "Logged in successfully. Starting data check..."
+    
+    # Reset lazy load state on successful login
+    st.session_state.vocab_data = None
+    st.session_state.has_more_data = True
+    st.session_state.total_word_count = 0
+
+    # SYNCHRONOUS LOAD WITH VISUAL SPINNER (Fast load of first batch)
+    with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
+        load_and_update_vocabulary_data() 
+        
+    st.rerun()
+    
+def handle_logout():
+    """Handles session state reset."""
+    st.session_state.is_auth = False
+    st.session_state.current_user_email = None
+    st.session_state.quiz_active = False
+    st.session_state.is_admin = False
+    st.session_state.data_refresh_key = 0
+    st.session_state.vocab_data = None
+    st.session_state.has_more_data = True
+    st.session_state.total_word_count = 0
+    st.rerun()
+
+# ======================================================================
+# 6. UI COMPONENTS
+# ======================================================================
+
+def data_board_ui():
+    """Displays key metrics and the status of background tasks."""
+    
+    if not st.session_state.is_auth or st.session_state.vocab_data is None:
+        return
+    
+    word_count = st.session_state.total_word_count
+    missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+    
+    st.header("📊 Application Status Board")
+    
+    cols = st.columns(4)
+    
+    with cols[0]:
+        st.metric(label="Total Words (DB)", value=word_count, delta=f"Target: {REQUIRED_WORD_COUNT}")
+    with cols[1]:
+        st.metric(label="Words Loaded (RAM)", value=len(st.session_state.vocab_data)) 
+    with cols[2]:
+        st.metric(label="Words Missing Briefing", value=missing_briefing_count)
+    with cols[3]:
+        status_message = st.session_state.get('autotask_message', "System Idle.")
+        
+        if st.session_state.autotask_running:
+             st.info(f"**Status (Running):** {status_message}")
+             st.spinner("Processing...") 
+        elif st.session_state.autotask_status == 'Complete' or "complete" in status_message:
+             st.success(f"**Status (Complete):** {status_message}")
+        elif st.session_state.autotask_status == 'Error':
+             st.error(f"**Status (Error):** {status_message}")
+        else:
+             st.markdown(f"**Status:** {status_message}")
+            
+    st.markdown("---")
+
+def display_vocabulary_ui():
+    """Renders the Vocabulary Display feature with Paging functionality based on loaded data."""
+    st.header("📚 Vocabulary Display", divider="blue")
+    
+    if st.session_state.vocab_data is None or not st.session_state.vocab_data:
+        st.info("No vocabulary loaded yet. Please check the Data Tools tab to generate the first batch.")
+        return
+
+    total_loaded_words = len(st.session_state.vocab_data)
+    total_db_words = st.session_state.total_word_count
+
+    start_index = st.session_state.current_page_index * LOAD_BATCH_SIZE
+    end_index = min(start_index + LOAD_BATCH_SIZE, total_loaded_words)
+    
+    if start_index >= total_loaded_words and total_loaded_words > 0:
+        st.session_state.current_page_index = max(0, (total_loaded_words // LOAD_BATCH_SIZE) - 1)
+        st.rerun()
+        return
+
+    
+    st.markdown(f"**Showing Words {start_index + 1} - {end_index} of {total_db_words} High-Level SAT Words** (Loaded: {total_loaded_words})")
+    
+    
+    with st.container(border=True): 
+        
+        for i, data in enumerate(st.session_state.vocab_data[start_index:end_index]):
+            word_number = start_index + i + 1 
+            word = data.get('word', 'N/A').upper()
+            pronunciation = data.get('pronunciation', 'N/A')
+            definition = data.get('definition', 'N/A')
+            tip = data.get('tip', 'N/A')
+            usage = data.get('usage', 'N/A')
+            audio_base64 = data.get('audio_base64') 
+            
+            expander_title = f"**{word_number}. {word}** — {pronunciation}" 
+            
+            with st.expander(expander_title):
+                if audio_base64:
+                    audio_data_url = f"data:audio/mp3;base64,{audio_base64}"
+                    audio_html = f"""
+                        <audio controls style="width: 100%;" src="{audio_data_url}">
+                            Your browser does not support the audio element.
+                        </audio>
+                    """
+                    st.markdown(audio_html, unsafe_allow_html=True)
+                else:
+                    st.warning("Audio not available for this word.")
+                    if st.session_state.is_admin:
+                        st.button(
+                            f"Fix Audio for #{word_number}", 
+                            key=f"fix_audio_{start_index + i}", 
+                            on_click=handle_fix_single_audio, 
+                            args=(start_index + i,),
+                            type="primary",
+                            disabled=st.session_state.autotask_running
+                        )
+
+                st.markdown(f"**📖 Definition:** {definition.capitalize()}") 
+                st.markdown(f"**💡 Memory Tip:** *{tip}*") 
+                st.markdown(f"**🗣️ Usage:** *'{usage}'*") 
+            
+            if i < LOAD_BATCH_SIZE - 1 and (start_index + i + 1) < total_loaded_words:
+                 st.markdown("---")
+
+    col_prev, col_status, col_next = st.columns([1, 2, 1])
+    
+    with col_prev:
+        if st.session_state.current_page_index > 0:
+            st.button("⬅️ Previous 10 Words", on_click=go_to_prev_page, disabled=st.session_state.autotask_running)
+    
+    with col_status:
+        current_page = st.session_state.current_page_index + 1
+        max_loaded_pages = (total_loaded_words + LOAD_BATCH_SIZE - 1) // LOAD_BATCH_SIZE
+        st.markdown(f"<div style='text-align: center; padding-top: 10px;'>Page {current_page} of ~{max_loaded_pages} (loaded)</div>", unsafe_allow_html=True)
+
+    with col_next:
+        can_go_next = (end_index < total_loaded_words) or st.session_state.has_more_data
+        
+        button_label = "Next 10 Words ➡️"
+        if end_index == total_loaded_words and st.session_state.has_more_data:
+            button_label = "Fetch Next Batch ➡️"
+            
+        if can_go_next:
+            st.button(button_label, on_click=go_to_next_page, type="secondary", disabled=st.session_state.autotask_running)
+
+def generate_quiz_ui():
+    """Renders the Quiz Section feature."""
+    st.header("📝 Vocabulary Quiz", divider="green")
+    
+    total_words = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
+    
+    if total_words < QUIZ_SIZE:
+        st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}")
+        return
+
+    start_word_num = st.session_state.quiz_start_index + 1
+    end_word_num = min(st.session_state.quiz_start_index + QUIZ_SIZE, total_words)
+
+    def start_new_quiz():
+        start = st.session_state.quiz_start_index
+        end = start + QUIZ_SIZE
+        words_pool = st.session_state.vocab_data[start:end]
+        if len(words_pool) < QUIZ_SIZE: st.error(f"Cannot start quiz. Need {QUIZ_SIZE} words starting from position {start + 1}."); return
+        
+        quiz_details = []
+        all_definitions = {d['definition'].capitalize() for d in st.session_state.vocab_data}
+        all_definitions_list = list(all_definitions)
+        
+        for question_data in words_pool:
+            correct_answer = question_data['definition'].capitalize()
+            decoys = random.sample([d for d in all_definitions_list if d != correct_answer], min(3, len([d for d in all_definitions_list if d != correct_answer])))
+            options = [correct_answer] + decoys
+            random.shuffle(options)
+            original_word_index = st.session_state.vocab_data.index(question_data) + 1
+            
+            quiz_details.append({"word": question_data['word'], "correct_answer": correct_answer, "tip": question_data['tip'], "usage": question_data['usage'], "options": options, "index": original_word_index})
+            
+        st.session_state.quiz_details = quiz_details
+        st.session_state.quiz_active = True
+        st.session_state.quiz_results = None 
+        st.rerun()
+
+    def advance_quiz_index():
+        st.session_state.quiz_start_index += QUIZ_SIZE
+        st.session_state.quiz_active = False 
+        st.rerun()
+    
+    if not st.session_state.quiz_active:
+        
+        if start_word_num > total_words:
+            st.info("You have completed all available quiz blocks! Resetting to start.")
+            st.session_state.quiz_start_index = 0
+            start_word_num = 1
+            end_word_num = min(QUIZ_SIZE, total_words)
+            
+        st.markdown(f"**Current Quiz Block:** Words {start_word_num} through {end_word_num}.")
+        
+        st.button(f"Start Quiz on Words #{start_word_num} - #{end_word_num}", on_click=start_new_quiz, type="primary")
+        return
+    
+    if st.session_state.quiz_results is not None:
+        score = st.session_state.quiz_results['score']
+        total = st.session_state.quiz_results['total']
+        accuracy = st.session_state.quiz_results['accuracy']
+        
+        if score == total: st.balloons(); st.success(f"🎉 Quiz Complete! Perfect Score! {score} out of {total} (Accuracy: {accuracy}%)")
+        else: st.warning(f"Quiz Complete! Final Score: **{score}** out of **{total}** (Accuracy: {accuracy}%)")
+            
+        st.subheader("Review Your Answers")
+        for i, result in enumerate(st.session_state.quiz_results['feedback']):
+            st.markdown(f"#### **Word #{result['index']}: {result['word']}**") 
+            st.markdown(f"**Your Answer:** {result['user_choice']}")
+            st.markdown(f"**Correct Answer:** {result['correct_answer']}")
+            if not result['is_correct']:
+                st.markdown(f"**Memory Tip:** *{result['tip']}*")
+                st.markdown(f"**Usage:** *'{result['usage']}'*")
+            st.markdown("---")
+            
+        st.session_state.quiz_active = False 
+        st.session_state.quiz_results = None 
+        
+        next_start_index = st.session_state.quiz_start_index + QUIZ_SIZE
+        if next_start_index < total_words:
+            st.button(f"Start Next Quiz Block (Words #{next_start_index + 1} - #{min(next_start_index + QUIZ_SIZE, total_words)})", on_click=advance_quiz_index, type="secondary")
+        else:
+            st.info("You have completed all available words in the database!")
+            st.session_state.quiz_start_index = 0
+            st.button("Restart Quiz from Word #1", on_click=advance_quiz_index, type="secondary")
+            
+        return
+    
+    quiz_details = st.session_state.quiz_details
+    
+    with st.form(key="full_quiz_form"):
+        st.subheader(f"Answer the following {QUIZ_SIZE} questions:")
+        if 'user_responses' not in st.session_state: st.session_state.user_responses = [None] * QUIZ_SIZE
+        
+        for i, q in enumerate(quiz_details):
+            st.markdown(f"#### **Word #{q['index']}. Define: {q['word'].upper()}**") 
+            user_choice = st.radio("Select the correct definition:", q['options'], key=f"quiz_q_{i}", index=None, label_visibility="collapsed")
+            st.session_state.user_responses[i] = user_choice
+
+        submitted = st.form_submit_button("Submit All Answers")
+
+        if submitted:
+            final_score = 0
+            feedback_list = []
+            
+            if any(response is None for response in st.session_state.user_responses):
+                st.error("Please answer ALL questions before submitting."); return
+
+            for i, response in enumerate(st.session_state.user_responses):
+                q = quiz_details[i]
+                is_correct = (response == q['correct_answer'])
+                if is_correct: final_score += 1
+                
+                feedback_list.append({"word": q['word'], "user_choice": response, "correct_answer": q['correct_answer'], "is_correct": is_correct, "tip": q['tip'], "usage": q['usage'], "index": q['index']})
+            
+            st.session_state.quiz_results = {"score": final_score, "total": QUIZ_SIZE, "accuracy": round((final_score / QUIZ_SIZE) * 100, 1), "feedback": feedback_list}
+            del st.session_state.user_responses
+            st.rerun()
+
+def two_minute_drill_ui():
+    """Renders the UI for the 2-Minute Word Briefing feature."""
+    st.header("⏱️ 2-Minute Drill", divider="red")
+
+    def next_drill_word():
+        if st.session_state.drill_word_index < len(st.session_state.vocab_data) - 1:
+            st.session_state.drill_word_index += 1
+        elif len(st.session_state.vocab_data) > 0:
+            st.session_state.drill_word_index = 0 
+        st.rerun()
+
+    def prev_drill_word():
+        if st.session_state.drill_word_index > 0:
+            st.session_state.drill_word_index -= 1
+        elif len(st.session_state.vocab_data) > 0:
+            st.session_state.drill_word_index = len(st.session_state.vocab_data) - 1
+        st.rerun()
+
+    if st.session_state.vocab_data is None or not st.session_state.vocab_data:
+        st.info("No vocabulary loaded yet. Please generate some words via the Data Tools tab."); return
+
+    total_words = len(st.session_state.vocab_data)
+    current_index = st.session_state.drill_word_index
+    
+    if current_index >= total_words: st.session_state.drill_word_index = 0; current_index = 0; st.rerun(); return
+        
+    selected_word_data = st.session_state.vocab_data[current_index]
+    selected_word_str = selected_word_data.get('word', 'N/A').upper()
+    
+    st.markdown(f"**Current Word:** **{current_index + 1}** of **{total_words}**")
+
+    briefing_text = selected_word_data.get('briefing_text')
+    briefing_audio_base64 = selected_word_data.get('briefing_audio_base64')
+    briefing_exists_in_db = bool(briefing_audio_base64)
+
+    briefing = None
+    
+    if briefing_exists_in_db:
+        briefing = {"text": briefing_text, "audio_base64": briefing_audio_base64}
+        st.success("Briefing content loaded from database.")
+    
+    if not briefing_exists_in_db and st.session_state.is_admin:
+        st.warning(f"Briefing content missing for {selected_word_str}. Generate it now!")
+        if st.button(f"Generate and Save Briefing for {selected_word_str}", type="primary", key="manual_drill_gen", disabled=st.session_state.autotask_running):
+            auto_generate_briefings_manual(1); st.rerun() 
+    
+    if briefing:
+        st.subheader(f"Deep Dive: {selected_word_str}")
+        
+        if briefing['audio_base64']:
+            audio_data_url = f"data:audio/mp3;base64,{briefing['audio_base64']}"
+            audio_html = f"""<audio controls style="width: 100%;" src="{audio_data_url}"></audio>"""
+            st.markdown(audio_html, unsafe_allow_html=True)
+            st.markdown("---")
+            
+        st.markdown("##### 🔊 Full Briefing Transcript")
+        clean_briefing_text = re.sub(r'[\u2013\u2014]', '-', briefing['text']) 
+        st.markdown(clean_briefing_text)
+        st.markdown("---")
+        st.info(f"The briefing is about {len(briefing['text'].split())} words long.")
+    elif not briefing_exists_in_db and not st.session_state.is_admin:
+        st.info("The 2-Minute Briefing for this word is currently missing. The Admin is running an automatic fix task to generate this content. Please check back later!")
+    
+    col_prev, col_next = st.columns([1, 1])
+    
+    with col_prev:
+        if current_index > 0: st.button("⬅️ Previous Word", on_click=prev_drill_word)
+    
+    with col_next:
+        if current_index < total_words - 1: st.button("Next Word ➡️", on_click=next_drill_word, type="secondary")
+        elif total_words > 0: st.button("↩️ Start Over", on_click=next_drill_word, type="secondary")
+
+def admin_extraction_ui():
+    """Renders the Admin Extraction and User Management feature."""
+    st.header("💡 Data Tools", divider="orange") 
+    
+    if not st.session_state.is_admin: st.warning("You must be logged in as the Admin to use this tool."); return
+
+    st.subheader("Manual Word & All Content Entry")
+    with st.form(key="manual_word_form"):
+        manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input").strip()
+        manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)", disabled=st.session_state.autotask_running)
+        if manual_submit: handle_manual_word_entry(manual_word); return
+
+    st.markdown("---")
+    st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
+    
+    if st.session_state.vocab_data:
+        missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
+        missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+    else: missing_audio_count = 0; missing_briefing_count = 0
+            
+    st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
+    st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
+
+    col_audio_fix, col_briefing_gen = st.columns(2)
+    with col_audio_fix:
+        if st.button("Attempt Bulk Audio Fix", type="primary", disabled=st.session_state.autotask_running):
+            handle_bulk_audio_fix(); return
+    with col_briefing_gen:
+        if st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", disabled=st.session_state.autotask_running):
+            auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH); return
+
+    st.markdown("---")
+    st.subheader("Vocabulary Extraction (Bulk - Background Task)")
+    st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+    if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", type="secondary", disabled=st.session_state.autotask_running): 
+        handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False); return
+
+    st.markdown("---")
+    st.subheader("Manual Data Refresh (Cache Bust)")
+    if st.button("Force Reload Data from DB", type="danger", disabled=st.session_state.autotask_running):
+        st.session_state.vocab_data = None ; st.session_state.total_word_count = 0; st.rerun(); return
+
+
+# ======================================================================
+# 7. STREAMLIT APPLICATION STRUCTURE (MAIN)
+# ======================================================================
+
+def main():
+    """The main Streamlit application function."""
+    st.set_page_config(page_title="AI Vocabulary Builder", layout="wide")
+    st.title("🧠 AI-Powered Vocabulary Builder")
+    
+    initialize_session_state()
+    
+    if st.session_state.is_admin:
+        task_controller.check_task_status()
+    
+    with st.sidebar:
+        st.header("User Login")
+        if not st.session_state.is_auth:
+            st.markdown("##### New User Registration / Existing User Login")
+            user_email = st.text_input("📧 Email", key="user_email_input", value=st.session_state.current_user_email or "")
+            password = st.text_input("🔑 Password", type="password", key="password_input")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Login", key="login_btn", type="primary"): handle_auth(user_email, password)
+            with col2:
+                if st.button("Register", key="register_btn"): handle_auth(user_email, password)
+            st.markdown("---")
+            st.markdown(f"**Admin Login:** `{ADMIN_EMAIL}` / `Jamshaid,1981`")
+        else:
+            display_name = "Admin" if st.session_state.is_admin else st.session_state.current_user_email
+            st.success(f"Logged in as: **{display_name}**")
+            if st.button("Log Out", on_click=handle_logout): pass
+                
+    if st.session_state.is_auth and st.session_state.vocab_data is None:
+        load_and_update_vocabulary_data() 
+        st.rerun() 
+    
+    if not st.session_state.is_auth:
+        st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
+    else:
+        # AUTOMATIC DATA FETCHING/FIXING LOGIC (Admin Only)
+        if st.session_state.is_admin and st.session_state.initial_load_done and not st.session_state.autotask_running:
+            
+            if st.session_state.total_word_count < AUTO_FETCH_THRESHOLD:
+                 handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
+            
+            else:
+                auto_generate_briefings() 
+
+        data_board_ui()
+
+        tab_display, tab_quiz, tab_drill, tab_admin = st.tabs([
+            "📚 Vocabulary List", 
+            "📝 Quiz Section", 
+            "⏱️ 2-Minute Drill",
+            "🛠️ Data Tools"
+        ])
+        
+        with tab_display: display_vocabulary_ui()
+        with tab_quiz: generate_quiz_ui()
+        with tab_drill: two_minute_drill_ui()
+        with tab_admin: admin_extraction_ui()
+
+if __name__ == "__main__":
+    main()

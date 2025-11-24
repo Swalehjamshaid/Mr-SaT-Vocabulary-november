@@ -433,7 +433,24 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
     
     try:
         generated_count = 0
-        words_to_process = [st.session_state.vocab_data[i] for i in batch_indices]
+        
+        # Fetch data directly from DB to ensure we have the absolute latest state
+        # MODIFICATION: Re-fetch the words to be processed from the database directly,
+        # not just relying on the potentially stale session state.
+        words_to_process_db = db_conn.query(
+            f"SELECT * FROM {TABLE_NAME} ORDER BY created_at ASC LIMIT {batch_size} OFFSET {batch_indices[0]};", ttl=0
+        ).to_dict('records')
+
+        words_to_process = [
+            word_data for word_data in words_to_process_db 
+            if not word_data.get('briefing_audio_base64')
+        ]
+        
+        if not words_to_process:
+            st.session_state.autotask_message = "All requested words already have briefings in the DB."
+            st.rerun()
+            return
+            
 
         with st.spinner(f"Generating missing briefings for {len(words_to_process)} words..."):
             for i, word_data in enumerate(words_to_process):
@@ -444,16 +461,19 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
                 if briefing_content:
                     # Update only the briefing fields in the database
                     if update_word_in_db(word_data, briefing_content):
-                         # Update session state with new data
-                         st.session_state.vocab_data[st.session_state.vocab_data.index(word_data)].update(briefing_content)
+                         # Note: We update session state, but the primary indicator of success is the DB update
+                         # We'll rely on the final data load to correct the full session state.
                          generated_count += 1
+                         
+        # MODIFICATION: Force a full data reload after the batch update to ensure the UI reflects changes
+        st.session_state.vocab_data = None
+        st.session_state.total_word_count = get_total_word_count()
 
-        remaining = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+        remaining_db = st.session_state.total_word_count - len(
+            db_conn.query(f"SELECT * FROM {TABLE_NAME} WHERE briefing_audio_base64 IS NOT NULL;", ttl=0).to_dict('records')
+        )
         
-        if remaining > 0:
-             st.session_state.autotask_message = f"✅ Briefing batch completed: {generated_count} processed. {remaining} remaining."
-        else:
-             st.session_state.autotask_message = f"✅ All words now have briefings."
+        st.session_state.autotask_message = f"✅ Briefing batch completed: {generated_count} processed. {remaining_db} remaining in DB."
              
         st.rerun()
              
@@ -510,18 +530,29 @@ def handle_manual_word_entry(word: str):
 
 def auto_generate_briefings_manual(batch_size: int):
     """Manually triggers a large batch generation of missing briefing content (Synchronous)."""
-    words_to_brief_indices = [
-        i for i, d in enumerate(st.session_state.vocab_data)  
-        if not d.get('briefing_audio_base64') 
-    ]
     
-    if not words_to_brief_indices:
-        st.session_state.autotask_message = "All words already have 2-Minute Briefing content!"
+    # MODIFICATION: Changed how we find the batch indices to be more robust
+    # Instead of relying on RAM index, we just try to process the first batch_size records
+    # starting from the beginning. The inner function will filter based on DB status.
+    
+    # We load the entire data set to get the total count for processing.
+    if st.session_state.vocab_data is None:
+        load_and_update_vocabulary_data()
+        
+    if not st.session_state.vocab_data:
+        st.session_state.autotask_message = "No words exist in the database yet to brief!"
         st.rerun()
         return
 
-    batch_indices = words_to_brief_indices[:batch_size]
+    # Create a batch of indices (0 to batch_size-1) to process the oldest words first
+    total_loaded = len(st.session_state.vocab_data)
+    batch_indices = list(range(min(batch_size, total_loaded)))
     
+    if not batch_indices:
+        st.session_state.autotask_message = "All words loaded in RAM appear to have briefings."
+        st.rerun()
+        return
+        
     _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=batch_size)
 
 def handle_fix_single_audio(word_index: int):

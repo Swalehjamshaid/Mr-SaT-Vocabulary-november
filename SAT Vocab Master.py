@@ -6,9 +6,8 @@ import base64
 import re
 import io
 import tempfile
-import threading
 from typing import List, Dict, Optional, Any
-from concurrent.futures import ThreadPoolExecutor
+# Removed threading and concurrent.futures imports
 
 import streamlit as st
 from pydantic import BaseModel, Field
@@ -126,18 +125,18 @@ def initialize_session_state():
     if 'data_refresh_key' not in st.session_state: st.session_state.data_refresh_key = 0
     if 'initial_load_done' not in st.session_state: st.session_state.initial_load_done = False
     
-    # Task Management
+    # Task Management - Simplified for synchronous execution
     if 'autotask_running' not in st.session_state: st.session_state.autotask_running = False
-    if 'autotask_message' not in st.session_state: st.session_state.autotask_message = None
+    if 'autotask_message' not in st.session_state: st.session_state.autotask_message = "System Idle."
     if 'autotask_status' not in st.session_state: st.session_state.autotask_status = 'Idle' 
     
-    # CRITICAL: Flag to prevent auto-task from firing on the immediate run after login
+    # Flag to prevent auto-task from firing on the immediate run after login
     if 'initial_auth_rerun_done' not in st.session_state: st.session_state.initial_auth_rerun_done = False 
 
     # LAZY LOADING STATE MANAGEMENT
     if 'has_more_data' not in st.session_state: st.session_state.has_more_data = True
     if 'total_word_count' not in st.session_state: st.session_state.total_word_count = 0
-    # ADDED: Flag to ensure auto-fetch runs only once per session if needed
+    # Flag to ensure auto-fetch runs only once per session if needed
     if 'auto_fetch_triggered' not in st.session_state: st.session_state.auto_fetch_triggered = False
 
 
@@ -169,7 +168,6 @@ def fetch_vocabulary_batch(offset: int) -> List[Dict]:
 
 def load_and_update_vocabulary_data():
     """Loads the INITIAL batch of data and calculates the total count."""
-    # We only load data if authenticated AND if data is not already loaded
     if not st.session_state.is_auth or st.session_state.vocab_data is not None: return
 
     st.session_state.total_word_count = get_total_word_count()
@@ -306,48 +304,32 @@ def generate_full_briefing_content(word_data: Dict) -> Optional[Dict]:
 
 
 # ======================================================================
-# 4. ASYNCHRONOUS TASK CONTROLLER
+# 4. ASYNCHRONOUS TASK CONTROLLER (REMOVED: Now Synchronous)
 # ======================================================================
 
-class LongRunningTaskController:
-    """Manages all long-running AI and I/O tasks in a separate thread."""
+# The LongRunningTaskController class has been entirely removed to eliminate the 
+# threading conflict that caused the StreamlitAPIException.
+# All tasks are now executed synchronously (blocking the UI).
+
+def _enrich_word_sync(word_data: Dict) -> Dict:
+    """Helper to generate audio and briefing content for a single word (Synchronous)."""
+    # 1. Pronunciation Audio
+    pronunciation_audio = generate_tts_audio(word_data['word'])
+    word_data['audio_base64'] = pronunciation_audio if pronunciation_audio else None
     
-    def __init__(self):
-        if 'task_thread' not in st.session_state:
-            st.session_state.task_thread = None
+    # 2. 2-Minute Briefing Content
+    briefing_content = generate_full_briefing_content(word_data)
+    if briefing_content:
+        word_data.update(briefing_content)
+    return word_data
 
-    def _update_session_state(self, status: str, message: str, running: bool):
-        st.session_state.autotask_status = status
-        st.session_state.autotask_message = message
-        st.session_state.autotask_running = running
-        st.rerun()
-
-    def run_task_in_thread(self, target_function, *args, **kwargs):
-        if st.session_state.autotask_running: return False 
-        st.session_state.task_thread = threading.Thread(
-            target=target_function, args=args, kwargs=kwargs, daemon=True
-        )
-        self._update_session_state('Running', 'Task initiated...', True)
-        st.session_state.task_thread.start()
-        return True
-
-    def check_task_status(self):
-        if st.session_state.autotask_running and st.session_state.task_thread and not st.session_state.task_thread.is_alive():
-            
-            st.session_state.total_word_count = get_total_word_count()
-            st.session_state.vocab_data = None 
-            st.session_state.has_more_data = True 
-            
-            self._update_session_state('Complete', st.session_state.autotask_message or 'Task complete. Reloading data.', False)
-            st.rerun() 
-        elif st.session_state.autotask_running:
-             st.rerun()
-
-    # --- THREAD TARGET FUNCTIONS ---
-    def _extract_and_save_batch(self, num_words: int, existing_words: List[str], auto_fetch: bool):
-        """Generates structured word data, enriches it with audio/briefing, and saves to DB."""
-        try:
-            st.session_state.autotask_message = f"LLM Task: Generating {num_words} structured words..."
+def _extract_and_save_batch_sync(num_words: int, existing_words: List[str]):
+    """Generates structured word data, enriches it, and saves to DB (Synchronous)."""
+    
+    status_placeholder = st.empty()
+    
+    try:
+        with st.spinner(f"Step 1/3: Requesting {num_words} words from Gemini..."):
             prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
             list_schema = {"type": "array", "items": SatWord.model_json_schema()}
             config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
@@ -357,126 +339,104 @@ class LongRunningTaskController:
             )
             new_data_list = json.loads(response.text)
             validated_words = [SatWord(**item).model_dump() for item in new_data_list if 'word' in item]
-
-            successful_saves = 0
             
-            # --- Enrich data with audio and briefing (multi-threaded) ---
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_word = {executor.submit(self._enrich_word, word_data): word_data for word_data in validated_words}
-                enriched_words = [future.result() for future in future_to_word]
+        successful_saves = 0
+        enriched_words = []
+        
+        # --- Enrich data with audio and briefing (Synchronous Loop) ---
+        with st.spinner(f"Step 2/3: Generating TTS audio and briefings for {len(validated_words)} words..."):
+            for i, word_data in enumerate(validated_words):
+                 # Update status within loop to show progress
+                status_placeholder.text(f"Step 2/3: Processing word {i+1} of {len(validated_words)}: {word_data['word']}")
+                enriched_words.append(_enrich_word_sync(word_data))
+        
+        status_placeholder.empty()
 
-            st.session_state.autotask_message = f"Saving {len(enriched_words)} words to DB..."
-            
+        with st.spinner(f"Step 3/3: Saving {len(enriched_words)} words to DB..."):
             for word_data in enriched_words:
                 if save_word_to_db(word_data):
                     successful_saves += 1
-            
-            st.session_state.autotask_message = f"✅ Extracted and saved {successful_saves} words."
-            
-        except Exception as e:
-            st.session_state.autotask_status = 'Error'
-            st.session_state.autotask_message = f"🔴 Extraction Failed: {e}"
-        finally:
-            st.session_state.autotask_running = False
-            
-    def _enrich_word(self, word_data: Dict) -> Dict:
-        """Helper to generate audio and briefing content for a single word."""
-        # 1. Pronunciation Audio
-        pronunciation_audio = generate_tts_audio(word_data['word'])
-        word_data['audio_base64'] = pronunciation_audio if pronunciation_audio else None
         
-        # 2. 2-Minute Briefing Content
-        briefing_content = generate_full_briefing_content(word_data)
-        if briefing_content:
-            word_data.update(briefing_content)
-        return word_data
+        st.session_state.autotask_message = f"✅ Success! Extracted and saved {successful_saves} words."
+        st.session_state.vocab_data = None # Force full data reload
+        st.session_state.total_word_count = get_total_word_count()
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"🔴 Extraction/Generation Failed (Synchronous): {e}")
+        st.session_state.autotask_message = f"🔴 Extraction Failed: {e}"
+    finally:
+        status_placeholder.empty()
+
+def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
+    """Processes a batch of existing words to add missing briefing content (Synchronous)."""
+    status_placeholder = st.empty()
+    
+    try:
+        generated_count = 0
+        words_to_process = [st.session_state.vocab_data[i] for i in batch_indices]
+
+        with st.spinner(f"Generating missing briefings for {len(words_to_process)} words..."):
+            for i, word_data in enumerate(words_to_process):
+                status_placeholder.text(f"Processing briefing {i+1} of {len(words_to_process)}: {word_data['word']}")
+                
+                briefing_content = generate_full_briefing_content(word_data)
+                
+                if briefing_content:
+                    # Update only the briefing fields in the database
+                    if update_word_in_db(word_data, briefing_content):
+                         # Update session state with new data
+                         st.session_state.vocab_data[st.session_state.vocab_data.index(word_data)].update(briefing_content)
+                         generated_count += 1
+
+        remaining = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
         
-    def _generate_briefing_batch(self, batch_indices: List[int], batch_size: int):
-        """Processes a batch of existing words to add missing briefing content."""
-        try:
-            generated_count = 0
-            words_to_process = [st.session_state.vocab_data[i] for i in batch_indices]
-
-            with ThreadPoolExecutor(max_workers=5) as executor:
-                future_to_word = {executor.submit(self._enrich_briefing, word_data): word_data for word_data in words_to_process}
-
-                for future in future_to_word:
-                    result = future.result()
-                    if result:
-                        word_data = future_to_word[future]
-                        # Update only the briefing fields in the database
-                        if update_word_in_db(word_data, result):
-                             # Update session state with new data
-                             st.session_state.vocab_data[st.session_state.vocab_data.index(word_data)].update(result)
-                             generated_count += 1
-
-            remaining = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
-            
-            if remaining > 0:
-                 st.session_state.autotask_message = f"✅ Auto-Briefing completed a batch of {generated_count}. {remaining} remaining. Processing next LEGACY batch..."
-            else:
-                 st.session_state.autotask_message = f"✅ Auto-Briefing complete: All words now have briefings."
-                 
-        except Exception as e:
-            st.session_state.autotask_status = 'Error'
-            st.session_state.autotask_message = f"🔴 Briefing Generation Failed: {e}"
-        finally:
-            st.session_state.autotask_running = False
-
-    def _enrich_briefing(self, word_data: Dict) -> Optional[Dict]:
-        briefing_content = generate_full_briefing_content(word_data)
-        if briefing_content:
-            return briefing_content
-        return None
-
-task_controller = LongRunningTaskController()
+        if remaining > 0:
+             st.session_state.autotask_message = f"✅ Briefing batch completed: {generated_count} processed. {remaining} remaining."
+        else:
+             st.session_state.autotask_message = f"✅ All words now have briefings."
+             
+        st.rerun()
+             
+    except Exception as e:
+        st.error(f"🔴 Briefing Generation Failed (Synchronous): {e}")
+        st.session_state.autotask_message = f"🔴 Briefing Generation Failed: {e}"
+    finally:
+        status_placeholder.empty()
 
 
 # ======================================================================
-# 5. HANDLERS (Adjusted for DB Abstraction)
+# 5. HANDLERS (Synchronous)
 # ======================================================================
 
 def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
-    """Triggers the bulk word extraction in a background thread."""
-    if st.session_state.autotask_running:
-        st.warning("A background task is already running. Please wait.")
-        return
-
+    """Triggers the bulk word extraction (Synchronous)."""
+    # Auto-fetch logic will now run synchronously if needed
+    
     # Pass existing words to LLM to avoid generating duplicates
     existing_words = [d['word'] for d in st.session_state.vocab_data if st.session_state.vocab_data]
     
-    # Run extraction and saving in a separate thread
-    if task_controller.run_task_in_thread(
-        task_controller._extract_and_save_batch, 
-        num_words=num_words, 
-        existing_words=existing_words, 
-        auto_fetch=auto_fetch
-    ):
-        st.session_state.autotask_message = f"Initiated extraction of {num_words} words..."
-
+    _extract_and_save_batch_sync(num_words=num_words, existing_words=existing_words)
+    
 def handle_manual_word_entry(word: str):
-    """Generates all content for a single word and saves it to the database."""
-    if st.session_state.autotask_running:
-        st.error("A background task is running. Please wait.")
-        return
+    """Generates all content for a single word and saves it to the database (Synchronous)."""
     if not word: 
         st.error("Please enter a word."); 
         return
         
-    st.info(f"Generating content for '{word}'...")
-    
     try:
-        # LLM generation for structured data
-        prompt = f"Generate the pronunciation, definition, mnemonic tip, and a usage sentence for the high-level SAT word: {word}. Return only the JSON object."
-        list_schema = {"type": "array", "items": SatWord.model_json_schema()}
-        config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
-        response = gemini_client.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=config)
-        data_list = json.loads(response.text)
-        new_word_data = SatWord(**data_list[0]).model_dump()
-        
-        # Enrich with audio and briefing content
-        new_word_data = task_controller._enrich_word(new_word_data)
-        
+        with st.spinner(f"Generating content for '{word}'..."):
+            # LLM generation for structured data
+            prompt = f"Generate the pronunciation, definition, mnemonic tip, and a usage sentence for the high-level SAT word: {word}. Return only the JSON object."
+            list_schema = {"type": "array", "items": SatWord.model_json_schema()}
+            config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
+            response = gemini_client.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=config)
+            data_list = json.loads(response.text)
+            new_word_data = SatWord(**data_list[0]).model_dump()
+            
+            # Enrich with audio and briefing content (Synchronous)
+            new_word_data = _enrich_word_sync(new_word_data)
+            
     except Exception as e:
         st.error(f"🔴 Failed to generate content for '{word}'. Error: {e}"); return
 
@@ -490,35 +450,8 @@ def handle_manual_word_entry(word: str):
     else:
         st.error("🔴 Failed to save to DB.")
 
-def auto_generate_briefings():
-    """Admin Auto-Task for processing LEGACY words missing the 2-minute briefing."""
-    if not st.session_state.is_admin or st.session_state.autotask_running:
-        return
-
-    words_to_brief_indices = [
-        i for i, d in enumerate(st.session_state.vocab_data) 
-        if not d.get('briefing_audio_base64') 
-    ]
-    
-    if not words_to_brief_indices:
-        return
-
-    # Process only a small batch automatically to prevent resource exhaustion
-    batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
-    
-    if task_controller.run_task_in_thread(
-        task_controller._generate_briefing_batch, 
-        batch_indices=batch_indices, 
-        batch_size=BRIEFING_BATCH_SIZE
-    ):
-        st.session_state.autotask_message = f"Admin Auto-Task: Generating {len(batch_indices)} LEGACY missing Briefings..."
-        
 def auto_generate_briefings_manual(batch_size: int):
-    """Manually triggers a large batch generation of missing briefing content."""
-    if st.session_state.autotask_running:
-        st.warning("A background task is already running. Please wait.")
-        return
-
+    """Manually triggers a large batch generation of missing briefing content (Synchronous)."""
     words_to_brief_indices = [
         i for i, d in enumerate(st.session_state.vocab_data)  
         if not d.get('briefing_audio_base64') 
@@ -531,26 +464,23 @@ def auto_generate_briefings_manual(batch_size: int):
 
     batch_indices = words_to_brief_indices[:batch_size]
     
-    if task_controller.run_task_in_thread(
-        task_controller._generate_briefing_batch, 
-        batch_indices=batch_indices, 
-        batch_size=batch_size
-    ):
-        st.session_state.autotask_message = f"Status: Manually starting bulk generation for {len(batch_indices)} missing briefings (Batch Size {batch_size})...."
+    _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=batch_size)
+
+# The auto_generate_briefings function is now removed, as all auto-tasks should be 
+# handled by the synchronous manual handler via the main loop check.
 
 def handle_fix_single_audio(word_index: int):
-    """Generates missing pronunciation audio for a single word and updates the DB document."""
-    if st.session_state.autotask_running:
-        st.error("A background task is running. Please wait.")
-        return
+    """Generates missing pronunciation audio for a single word and updates the DB document (Synchronous)."""
+    # This handler can remain mostly the same, as it was already synchronous
+
     if word_index < 0 or word_index >= len(st.session_state.vocab_data):
         st.error("Invalid word index."); return
         
     word_data = st.session_state.vocab_data[word_index]
     word = word_data['word']
     
-    st.info(f"Attempting to fix pronunciation for '{word}'...")
-    audio_data = generate_tts_audio(word)
+    with st.spinner(f"Attempting to fix pronunciation for '{word}'..."):
+        audio_data = generate_tts_audio(word)
     
     if audio_data:
         fields_to_update = {'audio_base64': audio_data}
@@ -564,11 +494,7 @@ def handle_fix_single_audio(word_index: int):
     st.rerun()
 
 def handle_bulk_audio_fix():
-    """Attempts to generate and save missing pronunciation audio for all corrupted words."""
-    if st.session_state.autotask_running:
-        st.error("A background task is running. Please wait.")
-        return
-        
+    """Attempts to generate and save missing pronunciation audio for all corrupted words (Synchronous)."""
     words_to_fix_indices = [i for i, d in enumerate(st.session_state.vocab_data) if d.get('audio_base64') is None]
     
     if not words_to_fix_indices: st.success("All loaded words already have pronunciation audio!"); return
@@ -579,10 +505,14 @@ def handle_bulk_audio_fix():
 
     status_placeholder.info(f"Starting bulk fix for {total_count} corrupted words...")
     
-    with st.spinner("Processing audio fix... this may take a moment."):
+    with st.spinner("Processing audio fix... this will block the UI for a moment."):
         for i, index in enumerate(words_to_fix_indices):
             word_data = st.session_state.vocab_data[index]
             word = word_data['word']
+            
+            # Update status
+            status_placeholder.text(f"Processing audio fix {i+1} of {total_count}: {word}")
+            
             audio_data = generate_tts_audio(word)
     
             if audio_data:
@@ -603,7 +533,7 @@ def handle_bulk_audio_fix():
     st.rerun()
 
 def handle_auth(email: str, password: str):
-    """Handles Mock user registration and login."""
+    """Handles Mock user registration and login (UNCHANGED)."""
     if not email or not password: st.error("Please enter both Email and Password."); return
         
     is_admin = (email == ADMIN_EMAIL and password == ADMIN_PASSWORD)
@@ -619,16 +549,16 @@ def handle_auth(email: str, password: str):
     st.session_state.drill_word_index = 0 
     st.session_state.autotask_message = "Logged in successfully. Starting data check..."
     
-    # We delay loading data until the main block to trigger auto-fetch logic
+    # Reset flags and data to force a reload
     st.session_state.vocab_data = None
     st.session_state.has_more_data = True
     st.session_state.total_word_count = 0
     st.session_state.auto_fetch_triggered = False 
-    st.session_state.initial_auth_rerun_done = False # Reset flag on new login
+    st.session_state.initial_auth_rerun_done = False 
     st.rerun()
     
 def handle_logout():
-    """Handles session state reset."""
+    """Handles session state reset (UNCHANGED)."""
     st.session_state.is_auth = False
     st.session_state.current_user_email = None
     st.session_state.quiz_active = False
@@ -642,21 +572,19 @@ def handle_logout():
     st.rerun()
     
 def manual_refresh_callback():
-    """Callback function for the Force Reload Data button."""
-    if st.session_state.autotask_running:
-        st.warning("Cannot refresh data while a background task is running.")
-        return
+    """Callback function for the Force Reload Data button (SIMPLIFIED)."""
+    # Since we are synchronous, we don't need the autotask_running check here.
     st.session_state.vocab_data = None 
     st.session_state.total_word_count = 0
     st.info("Initiating manual data refresh...")
     st.rerun()
 
 # ======================================================================
-# 6. UI COMPONENTS (UNCHANGED)
+# 6. UI COMPONENTS 
 # ======================================================================
 
 def data_board_ui():
-    """Displays key metrics and the status of background tasks."""
+    """Displays key metrics and the status of tasks."""
     
     if not st.session_state.is_auth: return
     
@@ -679,12 +607,12 @@ def data_board_ui():
     with cols[3]:
         status_message = st.session_state.get('autotask_message', "System Idle.")
         
-        if st.session_state.autotask_running:
+        # Display simplified status since background thread is gone
+        if "Running" in status_message or "Processing" in status_message:
              st.info(f"**Status (Running):** {status_message}")
-             st.spinner("Processing...") 
-        elif st.session_state.autotask_status == 'Complete' or "complete" in status_message:
+        elif "Success" in status_message or "✅" in status_message:
              st.success(f"**Status (Complete):** {status_message}")
-        elif st.session_state.autotask_status == 'Error':
+        elif "🔴" in status_message:
              st.error(f"**Status (Error):** {status_message}")
         else:
              st.markdown(f"**Status:** {status_message}")
@@ -692,6 +620,7 @@ def data_board_ui():
     st.markdown("---")
 
 def display_vocabulary_ui():
+    # ... (unchanged)
     """Renders the Vocabulary Display feature with Paging functionality based on loaded data."""
     st.header("📚 Vocabulary Display", divider="blue")
     
@@ -779,6 +708,7 @@ def display_vocabulary_ui():
             st.button(button_label, on_click=go_to_next_page, type="secondary")
 
 def generate_quiz_ui():
+    # ... (unchanged)
     """Renders the Quiz Section feature."""
     st.header("📝 Vocabulary Quiz", divider="green")
     
@@ -896,6 +826,7 @@ def generate_quiz_ui():
             st.rerun()
 
 def two_minute_drill_ui():
+    # ... (unchanged)
     """Renders the UI for the 2-Minute Word Briefing feature."""
     st.header("⏱️ 2-Minute Drill", divider="red")
 
@@ -968,16 +899,11 @@ def two_minute_drill_ui():
         if current_index < total_words - 1: st.button("Next Word ➡️", on_click=next_drill_word, type="secondary")
         elif total_words > 0: st.button("↩️ Start Over", on_click=next_drill_word, type="secondary")
 
-# Dummy function to show warning when the task is running
-def dummy_warning_callback():
-    st.session_state.autotask_message = "🛑 A background task is running! Please wait for completion."
-    st.session_state.autotask_status = 'Running'
-    st.rerun()
 
 def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     """
     Renders all interactive admin elements into the given container using simplified 
-    st.button and eliminating complex, nested form structures.
+    st.button and synchronous execution handlers.
     """
     
     # --- MANUAL WORD ENTRY (Synchronous) ---
@@ -993,7 +919,7 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
 
     container.markdown("---")
     
-    # --- BULK AND REFRESH TOOLS (Using simplified st.button calls) ---
+    # --- BULK AND REFRESH TOOLS (Synchronous Calls) ---
     container.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
     
     if st.session_state.vocab_data:
@@ -1007,35 +933,31 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     col_audio_fix, col_briefing_gen = container.columns(2)
     
     with col_audio_fix:
-        container.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix_simple", type="primary", on_click=handle_bulk_audio_fix)
+        container.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix_sync", type="primary", on_click=handle_bulk_audio_fix)
     with col_briefing_gen:
-        container.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing_simple", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
+        container.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Blocking)", key="btn_force_briefing_sync", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
 
     container.markdown("---")
-    container.subheader("Vocabulary Extraction (Bulk - Background Task)")
+    container.subheader("Vocabulary Extraction (Bulk - Blocking)")
     container.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
     
-    container.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract_simple", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+    container.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Blocking)", key="btn_force_extract_sync", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
 
     container.markdown("---")
     
     container.subheader("Manual Data Refresh (Cache Bust)")
-    # This is the final button that has been crashing. Now completely isolated.
+    # This button, now in a synchronous context, is no longer prone to thread races.
     container.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
 
+
 def render_admin_status(container: st.delta_generator.DeltaGenerator):
-    """Renders the disabled status message into the given container."""
-    container.info("🛑 **A Background Task is Running!** Data manipulation buttons are currently inactive. Check the **Application Status Board** for progress.")
+    """Renders the status message when tasks are running (SIMPLIFIED)."""
+    # Since all tasks are synchronous, this is only used for displaying the *current* process status (which is fast)
+    container.info(f"**Status:** {st.session_state.autotask_message}")
     container.markdown("---")
-    container.subheader("Manual Word & All Content Entry")
-    container.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_disp", disabled=True)
-    container.button("Generate ALL Content (Synchronous & Slow)", disabled=True)
+    container.subheader("All Tools Interactive")
+    container.markdown("Tools are now synchronous. Click a button to begin a task and watch the spinner!")
     container.markdown("---")
-    container.subheader("Bulk Operations Inactive")
-    container.info("Wait for background process to finish before using Bulk Tools.")
-    container.markdown("---")
-    container.subheader("Manual Data Refresh (Cache Bust)")
-    container.button("Force Reload Data from DB", key="btn_force_reload_disp", type="danger", disabled=True)
 
 
 def admin_extraction_ui():
@@ -1046,15 +968,10 @@ def admin_extraction_ui():
         st.warning("You must be logged in as the Admin to use this tool.")
         return
     
-    is_task_running = st.session_state.autotask_running
-    
-    # Use a simple, non-cached container for the primary rendering block.
+    # In the synchronous model, we always render the tools directly.
+    # The 'running' check is handled by the synchronous handler locking the UI.
     primary_container = st.container() 
-    
-    if is_task_running:
-        render_admin_status(primary_container)
-    else:
-        render_admin_tools(primary_container)
+    render_admin_tools(primary_container)
 
 
 # ======================================================================
@@ -1068,10 +985,9 @@ def main():
     
     initialize_session_state()
     
-    # Check if a background task completed and needs a UI update
-    if st.session_state.is_admin:
-        task_controller.check_task_status()
-    
+    # REMOVED: task_controller.check_task_status()
+    # No more background threads to check
+
     with st.sidebar:
         st.header("User Login")
         if not st.session_state.is_auth:
@@ -1094,37 +1010,32 @@ def main():
     if st.session_state.is_auth:
         
         # 1. Load initial data if it hasn't been loaded yet (vocab_data is None)
-        # This occurs on the first run after login.
         if st.session_state.vocab_data is None:
             with st.spinner("Downloading initial vocabulary records from DB... Please wait."):
                 load_and_update_vocabulary_data()
             
-            # CRITICAL: If this is the *first* run after login, flag it and RERUN immediately.
-            # This ensures the UI draws once cleanly before auto-tasks fire.
+            # Since the data load is synchronous, we use this to trigger the auto-fetch check
             if not st.session_state.initial_auth_rerun_done:
                  st.session_state.initial_auth_rerun_done = True
-                 st.rerun()
-            
-        # 2. AUTOMATIC DATA FETCHING/FIXING LOGIC (Admin Only, runs on the SECOND run after load)
-        if st.session_state.is_admin and st.session_state.initial_load_done and st.session_state.initial_auth_rerun_done and not st.session_state.autotask_running and not st.session_state.auto_fetch_triggered:
+                 st.rerun() # Ensure UI updates with loaded count
+
+        # 2. AUTOMATIC DATA FETCHING/FIXING LOGIC (Synchronous check on rerun)
+        # This will run the task synchronously and block the UI until completion if needed.
+        if st.session_state.is_admin and st.session_state.initial_load_done and st.session_state.initial_auth_rerun_done and not st.session_state.auto_fetch_triggered:
             
             # If database is nearly empty, automatically start bulk extraction of 25 words
             if st.session_state.total_word_count < AUTO_FETCH_THRESHOLD:
-                # Set flag to prevent double-triggering
                 st.session_state.auto_fetch_triggered = True 
+                
+                # EXECUTE SYNCHRONOUSLY, blocking the UI
                 handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
+                # handle_admin_extraction_button will call st.rerun() upon completion
             
             # If database is populated, check for and generate missing briefings
-            else:
-                auto_generate_briefings() 
+            # Removed auto_generate_briefings as it was the source of threading issues. 
+            # Manual tools are now available for this.
 
-        # --- Display Core UI (Always visible after data has been attempted to load) ---
-        
-        # Show a placeholder message if the database is confirmed empty and auto-fetch is starting
-        if st.session_state.total_word_count == 0 and st.session_state.is_admin and st.session_state.autotask_running:
-            status_msg = "The automatic generation task has been initiated in the background. Please wait a few moments and check the **Application Status Board**."
-            st.info(status_msg)
-
+        # --- Display Core UI ---
         data_board_ui()
 
         tab_display, tab_quiz, tab_drill, tab_admin = st.tabs([

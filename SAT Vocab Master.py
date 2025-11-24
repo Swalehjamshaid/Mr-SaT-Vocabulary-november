@@ -545,6 +545,8 @@ def run_auto_maintenance_sync():
     total_words = get_total_word_count()
     missing_briefings = get_words_missing_briefing_count()
     
+    task_ran = False
+    
     # Priority 1: Fix missing briefings (BRIEFING_BATCH_SIZE is small, so this is quick)
     if missing_briefings > 0:
         # Execute the briefing generation task
@@ -553,22 +555,25 @@ def run_auto_maintenance_sync():
         # We process a small batch (BRIEFING_BATCH_SIZE) to quickly make words usable
         batch_indices = [0] 
         _generate_briefing_batch_sync(batch_indices=batch_indices, batch_size=BRIEFING_BATCH_SIZE)
-        # Note: No st.rerun(). The next execution will check the status again.
-        return
+        task_ran = True
         
     # Priority 2: Generate new words if target is not met
-    if total_words < REQUIRED_WORD_COUNT:
+    elif total_words < REQUIRED_WORD_COUNT:
         # Execute the word extraction task
         st.session_state.autotask_message = f"Running Auto-Extraction: Target {REQUIRED_WORD_COUNT}. Current {total_words}."
         
         # We need to run the extraction synchronously
         handle_admin_extraction_button(num_words=AUTO_FETCH_BATCH, auto_fetch=True)
-        # Note: No st.rerun(). The next execution will check the status again.
-        return
+        task_ran = True
         
     # If both goals are met
-    st.session_state.autotask_message = "Auto-Maintenance Complete. Target 2000 words reached with all briefings."
-    st.session_state.auto_fetch_triggered = True # Mark as complete
+    else:
+        st.session_state.autotask_message = "Auto-Maintenance Complete. Target 2000 words reached with all briefings."
+        st.session_state.auto_fetch_triggered = True # Mark as complete
+
+    # CRITICAL FIX: RERUN if a task was just executed successfully to immediately start the next maintenance check.
+    if task_ran and st.session_state.autotask_message.startswith("✅"):
+        st.rerun()
 
 # ======================================================================
 # 5. HANDLERS (Synchronous)
@@ -582,7 +587,9 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
     existing_words = [] 
     
     _extract_and_save_batch_sync(num_words=num_words, existing_words=existing_words)
-    st.rerun() # Force UI update after the potentially long blocking task
+    # Rerun is handled by run_auto_maintenance_sync if this was part of the auto-fetch.
+    if not auto_fetch:
+        st.rerun() # Force UI update after the potentially long blocking task
 
 def handle_manual_word_entry(word: str):
     """Generates all content for a single word and saves it to the database (Synchronous)."""

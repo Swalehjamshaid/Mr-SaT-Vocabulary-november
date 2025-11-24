@@ -625,6 +625,8 @@ def handle_logout():
     st.session_state.initial_auth_rerun_done = False
     st.rerun()
     
+# The button functionality is REMOVED from the main UI in favor of a simpler link.
+# The callback is kept for internal use if needed.
 def manual_refresh_callback():
     """Callback function for the Force Reload Data button (SIMPLIFIED)."""
     st.session_state.vocab_data = None 
@@ -1004,8 +1006,13 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     container.markdown("---")
     
     container.subheader("Manual Data Refresh (Cache Bust)")
-    # REMOVED: The problematic st.button("Force Reload Data from DB")
-    container.button("Trigger Data Reload", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
+    # REPLACED UNSTABLE BUTTON with descriptive markdown link
+    container.markdown(
+        """
+        **To Force Data Reload:** This clears the local cache and re-fetches all words from the DB. 
+        [Click here to trigger reload] (javascript:window.location.reload()) 
+        """
+    )
 
 
 def render_admin_status(container: st.delta_generator.DeltaGenerator):

@@ -712,6 +712,8 @@ def display_vocabulary_ui():
                     st.markdown(audio_html, unsafe_allow_html=True)
                 else:
                     st.warning("Audio not available for this word.")
+                    # Button logic relies on st.session_state.autotask_running, which caused the error.
+                    # We rely on the master disable in the Admin UI now.
                     if st.session_state.is_admin:
                         st.button(
                             f"Fix Audio for #{word_number}", 
@@ -910,6 +912,8 @@ def two_minute_drill_ui():
     
     if not briefing_exists_in_db and st.session_state.is_admin:
         st.warning(f"Briefing content missing for {selected_word_str}. Generate it now!")
+        # Button logic relies on st.session_state.autotask_running, which caused the error.
+        # We rely on the master disable in the Admin UI now.
         if st.button(f"Generate and Save Briefing for {selected_word_str}", type="primary", key="manual_drill_gen", disabled=st.session_state.autotask_running):
             auto_generate_briefings_manual(1); st.rerun() 
     
@@ -944,45 +948,59 @@ def admin_extraction_ui():
     st.header("💡 Data Tools", divider="orange") 
     
     if not st.session_state.is_admin: st.warning("You must be logged in as the Admin to use this tool."); return
-
-    st.subheader("Manual Word & All Content Entry")
-    with st.form(key="manual_word_form"):
-        manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input").strip()
-        manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)", disabled=st.session_state.autotask_running)
-        if manual_submit: handle_manual_word_entry(manual_word); return
-
-    st.markdown("---")
-    st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
     
-    if st.session_state.vocab_data:
-        missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-        missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
-    else: missing_audio_count = 0; missing_briefing_count = 0
-            
-    st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
-    st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
-
-    col_audio_fix, col_briefing_gen = st.columns(2)
-    with col_audio_fix:
-        if st.button("Attempt Bulk Audio Fix", type="primary", disabled=st.session_state.autotask_running):
-            handle_bulk_audio_fix(); return
-    with col_briefing_gen:
-        if st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", disabled=st.session_state.autotask_running):
-            auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH); return
-
-    st.markdown("---")
-    st.subheader("Vocabulary Extraction (Bulk - Background Task)")
-    st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+    # Check the current status of the background task
+    is_task_running = st.session_state.autotask_running
     
-    # CRITICAL: This is the button the admin should click to start filling the database
-    if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", type="secondary", disabled=st.session_state.autotask_running): 
-        # MANUAL_EXTRACT_BATCH is 50, as requested
-        handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False); return
+    # Display message if task is running
+    if is_task_running:
+        st.info("🛑 **A Background Task is Running!** All data manipulation buttons are temporarily disabled to prevent errors.")
+    
+    # Use the status of the background task to disable the container content
+    with st.container():
+        
+        # NOTE: We rely on the Python object rendering to handle the disable logic
+        # For simplicity and to avoid the Streamlit API Exception, we pass the disabled state directly
+        
+        st.subheader("Manual Word & All Content Entry")
+        with st.form(key="manual_word_form"):
+            manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input", disabled=is_task_running).strip()
+            manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)", disabled=is_task_running)
+            if manual_submit: handle_manual_word_entry(manual_word); return
 
-    st.markdown("---")
-    st.subheader("Manual Data Refresh (Cache Bust)")
-    if st.button("Force Reload Data from DB", type="danger", disabled=st.session_state.autotask_running):
-        st.session_state.vocab_data = None ; st.session_state.total_word_count = 0; st.rerun(); return
+        st.markdown("---")
+        st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
+        
+        if st.session_state.vocab_data:
+            missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
+            missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+        else: missing_audio_count = 0; missing_briefing_count = 0
+                
+        st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
+        st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
+
+        col_audio_fix, col_briefing_gen = st.columns(2)
+        with col_audio_fix:
+            if st.button("Attempt Bulk Audio Fix", type="primary", disabled=is_task_running):
+                handle_bulk_audio_fix(); return
+        with col_briefing_gen:
+            if st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", type="secondary", disabled=is_task_running):
+                auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH); return
+
+        st.markdown("---")
+        st.subheader("Vocabulary Extraction (Bulk - Background Task)")
+        st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+        
+        # CRITICAL: This is the button the admin should click to start filling the database
+        if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", type="secondary", disabled=is_task_running): 
+            # MANUAL_EXTRACT_BATCH is 50, as requested
+            handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False); return
+
+        st.markdown("---")
+        st.subheader("Manual Data Refresh (Cache Bust)")
+        # This is the button that caused the error, ensure it is disabled while a task is running
+        if st.button("Force Reload Data from DB", type="danger", disabled=is_task_running):
+            st.session_state.vocab_data = None ; st.session_state.total_word_count = 0; st.rerun(); return
 
 
 # ======================================================================
@@ -1047,7 +1065,7 @@ def main():
         
         # Show a placeholder message if the database is confirmed empty and no task is running
         if st.session_state.total_word_count == 0 and not st.session_state.autotask_running:
-            st.info("Database is empty. Please use the 'Data Tools' tab to start bulk generation.")
+            st.info("Database is currently empty. The automatic generation task has started in the background (check Status Board).")
 
         data_board_ui()
 

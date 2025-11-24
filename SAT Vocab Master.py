@@ -15,6 +15,8 @@ import pandas as pd # Required for reading SQL results
 import sqlalchemy # Required by st.connection('sql')
 # Import specific error type from SQLAlchemy
 from sqlalchemy.exc import IntegrityError, ProgrammingError, OperationalError
+# Import text() for raw SQL execution
+from sqlalchemy import text 
 
 # --- EXTERNAL API IMPORTS ---
 try:
@@ -87,7 +89,8 @@ def create_table_if_not_exists(conn):
     """
     try:
         with conn.session as s:
-            s.execute(sql_create)
+            # FIX: Use text() to explicitly declare the multiline SQL as a raw SQL string
+            s.execute(text(sql_create))
             s.commit()
         st.success(f"✅ Table '{TABLE_NAME}' structure verified/created with wide columns.")
     except Exception as e:
@@ -106,6 +109,7 @@ def initialize_db_connection():
         create_table_if_not_exists(conn)
         
         # 2. Test query (optional check)
+        # Note: We don't wrap simple query() calls in text()
         conn.query(f"SELECT 'success' FROM {TABLE_NAME} LIMIT 1;", ttl=0)
         
         return conn
@@ -260,7 +264,8 @@ def save_word_to_db(word_data: Dict) -> bool:
             VALUES ({values_placeholders});
         """
         with db_conn.session as s:
-            s.execute(sql_insert, params=word_data)
+            # FIX: Use text() for INSERT to ensure stability
+            s.execute(text(sql_insert), params=word_data)
             s.commit()
         return True
     except IntegrityError as e:
@@ -293,7 +298,8 @@ def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
                 SET {', '.join(set_clauses)}
                 WHERE word = :word_name;
             """
-            s.execute(sql_update, params=params)
+            # FIX: Use text() for UPDATE to ensure stability
+            s.execute(text(sql_update), params=params)
             s.commit()
         return True
     except IntegrityError as e:

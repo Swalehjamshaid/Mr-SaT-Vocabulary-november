@@ -738,6 +738,7 @@ def display_vocabulary_ui():
                     # Button logic relies on st.session_state.autotask_running, which caused the error.
                     # We rely on the master disable in the Admin UI now.
                     if st.session_state.is_admin:
+                        # Use conditional check inside the button to prevent crash
                         st.button(
                             f"Fix Audio for #{word_number}", 
                             key=f"fix_audio_{start_index + i}", 
@@ -964,6 +965,12 @@ def two_minute_drill_ui():
         if current_index < total_words - 1: st.button("Next Word ➡️", on_click=next_drill_word, type="secondary")
         elif total_words > 0: st.button("↩️ Start Over", on_click=next_drill_word, type="secondary")
 
+# Dummy function to show warning when the task is running
+def dummy_warning_callback():
+    st.session_state.autotask_message = "🛑 A background task is running! Please wait for completion."
+    st.session_state.autotask_status = 'Running'
+    st.rerun()
+
 def admin_extraction_ui():
     """Renders the Admin Extraction and User Management feature."""
     st.header("💡 Data Tools", divider="orange") 
@@ -973,52 +980,69 @@ def admin_extraction_ui():
     # Check the current status of the background task
     is_task_running = st.session_state.autotask_running
     
-    # Display message if task is running
+    # --- CRITICAL FIX: Conditional Rendering ---
+    # We define a container/placeholder to hold the buttons
+    # Then we check if the task is running. If it is, we show a loading spinner instead of the buttons.
+    # If it is NOT running, we draw the buttons using the original (non-disabled) handlers.
+    
+    button_container = st.empty()
+    
     if is_task_running:
-        st.info("🛑 **A Background Task is Running!** Data manipulation buttons are temporarily disabled. Check the **Application Status Board** for progress.")
-    
-    # --- MANUAL WORD ENTRY (Still a form for clean field capture) ---
-    st.subheader("Manual Word & All Content Entry")
-    with st.form(key="manual_word_form", clear_on_submit=False):
-        manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input", disabled=is_task_running).strip()
-        manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)", disabled=is_task_running)
-        if manual_submit: 
-            handle_manual_word_entry(manual_word)
-            return
+        with button_container.container():
+             st.info("🛑 **A Background Task is Running!** Data manipulation buttons are currently inactive. Check the **Application Status Board** for progress.")
+             st.markdown("---")
+             st.subheader("Manual Word & All Content Entry")
+             st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input_disp", disabled=True)
+             st.button("Generate ALL Content (Synchronous & Slow)", disabled=True)
+             st.markdown("---")
+             st.subheader("Bulk Operations Inactive")
+             st.info("Wait for background process to finish before using Bulk Tools.")
+             st.markdown("---")
+             st.subheader("Manual Data Refresh (Cache Bust)")
+             st.button("Force Reload Data from DB", key="btn_force_reload_disp", type="danger", disabled=True)
+        return
+        
+    # --- IF TASK IS NOT RUNNING: Render the interactive buttons and forms ---
+    with button_container.container():
+        
+        # --- MANUAL WORD ENTRY (Synchronous) ---
+        st.subheader("Manual Word & All Content Entry")
+        with st.form(key="manual_word_form", clear_on_submit=False):
+            manual_word = st.text_input("Enter SAT-Level Word to Add:", key="manual_word_input").strip()
+            manual_submit = st.form_submit_button("Generate ALL Content (Synchronous & Slow)")
+            if manual_submit: 
+                handle_manual_word_entry(manual_word)
+                return
 
-    st.markdown("---")
-    
-    # --- BULK AND REFRESH TOOLS (CRITICAL FIX: Buttons rendered WITHOUT disabled=is_task_running) ---
-    st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
-    
-    if st.session_state.vocab_data:
-        missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
-        missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
-    else: missing_audio_count = 0; missing_briefing_count = 0
-            
-    st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
-    st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
+        st.markdown("---")
+        
+        # --- BULK AND REFRESH TOOLS ---
+        st.subheader("Audio Integrity & Bulk Fix (Legacy Word Processing)")
+        
+        if st.session_state.vocab_data:
+            missing_audio_count = len([d for d in st.session_state.vocab_data if d.get('audio_base64') is None])
+            missing_briefing_count = len([d for d in st.session_state.vocab_data if not d.get('briefing_audio_base64')])
+        else: missing_audio_count = 0; missing_briefing_count = 0
+                
+        st.markdown(f"**Corrupted Entries (Pronunciation):** {missing_audio_count} words.")
+        st.markdown(f"**Missing Briefings (2-Min Drill - Legacy):** {missing_briefing_count} words.") 
 
-    col_audio_fix, col_briefing_gen = st.columns(2)
-    with col_audio_fix:
-        # NOTE: Button still works, but without 'disabled'. The handler checks the running status.
-        st.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix", type="primary", on_click=handle_bulk_audio_fix)
-    with col_briefing_gen:
-        # NOTE: Button still works, but without 'disabled'. The handler checks the running status.
-        st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
+        col_audio_fix, col_briefing_gen = st.columns(2)
+        with col_audio_fix:
+            st.button("Attempt Bulk Audio Fix", key="btn_bulk_audio_fix", type="primary", on_click=handle_bulk_audio_fix)
+        with col_briefing_gen:
+            st.button(f"Force Generate {MANUAL_BRIEFING_BATCH} Missing Briefings (Background Task)", key="btn_force_briefing", type="secondary", on_click=lambda: auto_generate_briefings_manual(MANUAL_BRIEFING_BATCH))
 
-    st.markdown("---")
-    st.subheader("Vocabulary Extraction (Bulk - Background Task)")
-    st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
-    
-    # CRITICAL: Button works, but without 'disabled'. The handler checks the running status.
-    st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
+        st.markdown("---")
+        st.subheader("Vocabulary Extraction (Bulk - Background Task)")
+        st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+        
+        st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", key="btn_force_extract", type="secondary", on_click=lambda: handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False))
 
-    st.markdown("---")
-    st.subheader("Manual Data Refresh (Cache Bust)")
-    
-    # CRITICAL: This is the button causing the conflict. It is now rendered without 'disabled'.
-    st.button("Force Reload Data from DB", key="btn_force_reload", type="danger", on_click=manual_refresh_callback)
+        st.markdown("---")
+        st.subheader("Manual Data Refresh (Cache Bust)")
+        
+        st.button("Force Reload Data from DB", key="btn_force_reload", type="danger", on_click=manual_refresh_callback)
 
 
 # ======================================================================

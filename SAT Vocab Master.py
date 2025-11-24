@@ -39,8 +39,9 @@ TABLE_NAME: str = "sat_vocabulary"
 
 # --- App State and Constants ---
 REQUIRED_WORD_COUNT = 2000 
-LOAD_BATCH_SIZE = 50 # <-- DB Fetch size (keep high for performance)
-DISPLAY_PAGE_SIZE = 10 # <-- NEW: UI pagination size (set to 10 as requested)
+LOAD_BATCH_SIZE = 50 # <-- DB Fetch step size (used when appending more data)
+INITIAL_LOAD_MAX = 500 # <-- FINAL FIX: Increased to 500. This ensures all 416 words load immediately.
+DISPLAY_PAGE_SIZE = 10 # <-- UI pagination size (set to 10 as requested)
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25
@@ -181,16 +182,16 @@ def get_total_word_count() -> int:
     except Exception:
         return 0
 
-def fetch_vocabulary_batch(offset: int) -> List[Dict]:
-    """Fetches the next batch of words using offset-based SQL pagination."""
+def fetch_vocabulary_batch(offset: int, limit: int) -> List[Dict]:
+    """Fetches a batch of words using offset-based SQL pagination with a custom limit."""
     start_index = offset
     
     try:
-        # NOTE: Using LOAD_BATCH_SIZE (50) here for DB fetching efficiency
+        # NOTE: Limit is now dynamic (LOAD_BATCH_SIZE or INITIAL_LOAD_MAX)
         sql_query = f"""
             SELECT * FROM {TABLE_NAME}
             ORDER BY created_at ASC
-            LIMIT {LOAD_BATCH_SIZE}
+            LIMIT {limit}
             OFFSET {offset};
         """
         df = db_conn.query(sql_query, ttl=600)
@@ -201,19 +202,24 @@ def fetch_vocabulary_batch(offset: int) -> List[Dict]:
         return []
 
 def load_and_update_vocabulary_data():
-    """Loads the INITIAL batch of data and calculates the total count."""
+    """Loads the INITIAL batch of data (up to INITIAL_LOAD_MAX) and calculates the total count."""
     if not st.session_state.is_auth or st.session_state.vocab_data is not None: return
 
     st.session_state.total_word_count = get_total_word_count()
-    # Initial load uses LOAD_BATCH_SIZE (50)
-    vocab_list = fetch_vocabulary_batch(offset=0)
+    
+    # Determine the limit for the initial load
+    # It should be the lesser of the total words available or the INITIAL_LOAD_MAX (500)
+    initial_limit = min(st.session_state.total_word_count, INITIAL_LOAD_MAX)
+    
+    # Initial load uses the calculated initial_limit
+    vocab_list = fetch_vocabulary_batch(offset=0, limit=initial_limit)
     
     st.session_state.vocab_data = vocab_list
     st.session_state.initial_load_done = True
     
-    # Check if the fetched list is equal to the max load batch size to determine if more data exists
-    if vocab_list:
-        st.session_state.has_more_data = len(vocab_list) == LOAD_BATCH_SIZE
+    # Check if we loaded less than the total available words
+    if len(vocab_list) < st.session_state.total_word_count:
+        st.session_state.has_more_data = True
     else:
         st.session_state.has_more_data = False
     
@@ -226,11 +232,13 @@ def fetch_and_append_next_batch():
         return
 
     offset = len(st.session_state.vocab_data)
-    next_batch = fetch_vocabulary_batch(offset=offset)
+    # Append uses the standard LOAD_BATCH_SIZE (50)
+    next_batch = fetch_vocabulary_batch(offset=offset, limit=LOAD_BATCH_SIZE)
     
     if next_batch:
         st.session_state.vocab_data.extend(next_batch)
-        st.session_state.has_more_data = len(next_batch) == LOAD_BATCH_SIZE
+        # Check against the total DB count, not just the batch size
+        st.session_state.has_more_data = (offset + len(next_batch)) < st.session_state.total_word_count
         st.session_state.total_word_count = get_total_word_count() 
         st.success(f"Loaded {len(next_batch)} more words.")
     else:

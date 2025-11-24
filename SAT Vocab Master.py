@@ -39,7 +39,8 @@ TABLE_NAME: str = "sat_vocabulary"
 
 # --- App State and Constants ---
 REQUIRED_WORD_COUNT = 2000 
-LOAD_BATCH_SIZE = 50 # <-- Set to 50 for the initial fetch and pagination step size
+LOAD_BATCH_SIZE = 50 # <-- DB Fetch size (keep high for performance)
+DISPLAY_PAGE_SIZE = 10 # <-- NEW: UI pagination size (set to 10 as requested)
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25
@@ -185,7 +186,7 @@ def fetch_vocabulary_batch(offset: int) -> List[Dict]:
     start_index = offset
     
     try:
-        # NOTE: Using LOAD_BATCH_SIZE (50) here
+        # NOTE: Using LOAD_BATCH_SIZE (50) here for DB fetching efficiency
         sql_query = f"""
             SELECT * FROM {TABLE_NAME}
             ORDER BY created_at ASC
@@ -210,6 +211,7 @@ def load_and_update_vocabulary_data():
     st.session_state.vocab_data = vocab_list
     st.session_state.initial_load_done = True
     
+    # Check if the fetched list is equal to the max load batch size to determine if more data exists
     if vocab_list:
         st.session_state.has_more_data = len(vocab_list) == LOAD_BATCH_SIZE
     else:
@@ -237,14 +239,16 @@ def fetch_and_append_next_batch():
         
     st.rerun()
 
-# --- Pagination Logic (UNCHANGED) ---
+# --- Pagination Logic ---
 def go_to_next_page():
     total_loaded = len(st.session_state.vocab_data)
-    # MODIFICATION: Use LOAD_BATCH_SIZE for calculation
-    max_index = (total_loaded // LOAD_BATCH_SIZE) - 1
+    # MODIFICATION: Use DISPLAY_PAGE_SIZE (10) for UI pagination calculation
+    page_size = DISPLAY_PAGE_SIZE 
+    max_index_in_ram = (total_loaded // page_size) - 1
     current_index = st.session_state.current_page_index
     
-    if current_index == max_index and st.session_state.has_more_data:
+    # If we are on the last page currently loaded in RAM, try to fetch more data from DB
+    if current_index >= max_index_in_ram and st.session_state.has_more_data:
         fetch_and_append_next_batch() 
     
     st.session_state.current_page_index += 1
@@ -768,8 +772,8 @@ def display_vocabulary_ui():
     total_loaded_words = len(st.session_state.vocab_data)
     total_db_words = st.session_state.total_word_count
     
-    # MODIFICATION: Calculate page size based on LOAD_BATCH_SIZE (50)
-    page_size = LOAD_BATCH_SIZE
+    # MODIFICATION: Calculate page size based on DISPLAY_PAGE_SIZE (10) for UI
+    page_size = DISPLAY_PAGE_SIZE 
     start_index = st.session_state.current_page_index * page_size
     end_index = min(start_index + page_size, total_loaded_words)
     
@@ -841,7 +845,7 @@ def display_vocabulary_ui():
     
     with col_prev:
         if st.session_state.current_page_index > 0:
-            st.button("⬅️ Previous Words", on_click=go_to_prev_page)
+            st.button(f"⬅️ Previous {page_size} Words", on_click=go_to_prev_page)
     
     with col_status:
         current_page = st.session_state.current_page_index + 1
@@ -853,7 +857,7 @@ def display_vocabulary_ui():
         
         button_label = f"Next {page_size} Words ➡️"
         if end_index == total_loaded_words and st.session_state.has_more_data:
-            button_label = f"Fetch Next Batch ({page_size}) ➡️"
+            button_label = f"Fetch Next Batch ({LOAD_BATCH_SIZE}) ➡️" # Show the DB fetch size
             
         if can_go_next:
             st.button(button_label, on_click=go_to_next_page, type="secondary")

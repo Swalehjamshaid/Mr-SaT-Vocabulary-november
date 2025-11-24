@@ -1030,7 +1030,9 @@ def render_admin_tools(container: st.delta_generator.DeltaGenerator):
     
     container.subheader("Manual Data Refresh (Cache Bust)")
     # This button is the crash site. Using the cached container's button method here, isolated.
-    container.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
+    # CRITICAL: We explicitly wrap this volatile button in a column to give it extra isolation.
+    col_refresh = container.columns(1)[0]
+    col_refresh.button("Force Reload Data from DB", key="btn_force_reload_final", type="danger", on_click=manual_refresh_callback)
 
 def render_admin_status(container: st.delta_generator.DeltaGenerator):
     """Renders the disabled status message into the given container."""

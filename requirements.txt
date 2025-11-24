@@ -1,6 +1,7 @@
+# requirements.txt content:
 streamlit
-pydantic
+supabase
 google-genai
+pydantic
 gtts
-firebase-admin
-google-cloud-firestore
+# Add any other libraries your app imports (e.g., typing, requests, etc.)

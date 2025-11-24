@@ -484,12 +484,20 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
             for i, word_data in enumerate(words_to_process):
                 status_placeholder.text(f"Processing briefing {i+1} of {len(words_to_process)}: {word_data['word']}")
                 
-                briefing_content = generate_full_briefing_content(word_data)
-                
-                if briefing_content:
-                    # Update only the briefing fields in the database
-                    if update_word_in_db(word_data, briefing_content): # <--- This updates one word at a time atomically
-                         generated_count += 1
+                # --- CRITICAL FIX: Add a try/except inside the loop ---
+                try:
+                    briefing_content = generate_full_briefing_content(word_data)
+                    
+                    if briefing_content:
+                        # Update only the briefing fields in the database
+                        if update_word_in_db(word_data, briefing_content):
+                            generated_count += 1
+                        
+                except Exception as e:
+                    # Log the specific word failure and continue to the next word
+                    print(f"🔴 Briefing generation failed for word '{word_data['word']}': {e}. SKIPPING.")
+                    # If saving the word update fails, we still continue the loop.
+
                          
         # MODIFICATION: Force a full data reload after the batch update to ensure the UI reflects changes
         st.session_state.vocab_data = None
@@ -503,6 +511,7 @@ def _generate_briefing_batch_sync(batch_indices: List[int], batch_size: int):
         st.rerun()
              
     except Exception as e:
+        # Catch any failure that happened *outside* the word loop (e.g., DB fetch error)
         st.error(f"🔴 Briefing Generation Failed (Synchronous): {e}")
         st.session_state.autotask_message = f"🔴 Briefing Generation Failed: {e}"
     finally:

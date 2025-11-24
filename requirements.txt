@@ -1,7 +1,7 @@
-# requirements.txt content:
 streamlit
-supabase
+psycopg2-binary
+pandas
+gtts
 google-genai
 pydantic
-gtts
-# Add any other libraries your app imports (e.g., typing, requests, etc.)
+typing

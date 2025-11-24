@@ -45,7 +45,7 @@ DISPLAY_PAGE_SIZE = 10 # <-- UI pagination size (set to 10 as requested)
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
 AUTO_FETCH_BATCH = 25
-BRIEFING_BATCH_SIZE = 10 # Batch size for fixing missing briefings
+BRIEFING_BATCH_SIZE = 1 # <-- CRITICAL FIX: Changed from 10 to 1 for robust single-word error handling
 MANUAL_BRIEFING_BATCH = 50 
 MANUAL_EXTRACT_BATCH = 50
 

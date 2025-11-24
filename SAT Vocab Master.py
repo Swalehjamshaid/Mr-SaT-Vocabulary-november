@@ -13,16 +13,9 @@ from concurrent.futures import ThreadPoolExecutor
 import streamlit as st
 from pydantic import BaseModel, Field
 import pandas as pd # Required for reading SQL results
+import sqlalchemy # Required by st.connection('sql')
 
 # --- EXTERNAL API IMPORTS ---
-try:
-    # We use st.connection for the database, but need standard imports for AI/TTS
-    # The 'psycopg2-binary' driver is handled by st.connection type='sql' but must be in requirements.txt
-    pass
-except ImportError:
-    # The app won't reach here if st.connection works, but good practice.
-    pass
-
 try:
     from gtts import gTTS
 except ImportError:
@@ -44,21 +37,21 @@ except ImportError:
 # --- Database Constants ---
 TABLE_NAME: str = "sat_vocabulary" 
 
-# --- App State and Constants (UNCHANGED) ---
+# --- App State and Constants ---
 REQUIRED_WORD_COUNT = 2000 
-LOAD_BATCH_SIZE = 10         
+LOAD_BATCH_SIZE = 10         # Fetch and display 10 words at a time
 QUIZ_SIZE = 5 
 AUTO_FETCH_THRESHOLD = 50 
-AUTO_FETCH_BATCH = 25 
+AUTO_FETCH_BATCH = 25        # Words to fetch in background auto-task
 BRIEFING_BATCH_SIZE = 10 
 MANUAL_BRIEFING_BATCH = 50 
-MANUAL_EXTRACT_BATCH = 50 
+MANUAL_EXTRACT_BATCH = 50    # Words to fetch in foreground manual task
 
 # Admin Configuration (Mock Login)
 ADMIN_EMAIL = "roy.jamshaid@gmail.com" 
 ADMIN_PASSWORD = "Jamshaid,1981" 
 
-# Pydantic Schema for Vocabulary Word (UNCHANGED)
+# Pydantic Schema for Vocabulary Word
 class SatWord(BaseModel):
     word: str = Field(description="The SAT-level word.")
     pronunciation: str = Field(description="Simple, hyphenated phonetic pronunciation (e.g., eh-FEM-er-al).")
@@ -89,7 +82,6 @@ def initialize_db_connection():
         return conn
     
     except Exception as e:
-        # Check for the common error related to the missing table
         if "relation" in str(e) and "does not exist" in str(e):
             st.error(f"🔴 DATABASE TABLE MISSING: Table '{TABLE_NAME}' does not exist in Neon.")
             st.warning("ACTION: Please create the table in your Neon dashboard.")
@@ -123,7 +115,6 @@ except Exception as e:
 
 def initialize_session_state():
     """Sets up default session state variables."""
-    # ... (State initialization - unchanged) ...
     if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
     if 'is_auth' not in st.session_state: st.session_state.is_auth = False
     if 'vocab_data' not in st.session_state: st.session_state.vocab_data = None 
@@ -148,7 +139,6 @@ def initialize_session_state():
 def get_total_word_count() -> int:
     """Fetches the total document count using SQL."""
     try:
-        # Uses st.connection's caching feature (ttl=0 forces a fresh read)
         result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME};", ttl=0)
         return int(result.iloc[0, 0])
     except Exception:
@@ -156,6 +146,8 @@ def get_total_word_count() -> int:
 
 def fetch_vocabulary_batch(offset: int) -> List[Dict]:
     """Fetches the next batch of words using offset-based SQL pagination."""
+    start_index = offset
+    
     try:
         sql_query = f"""
             SELECT * FROM {TABLE_NAME}
@@ -163,10 +155,8 @@ def fetch_vocabulary_batch(offset: int) -> List[Dict]:
             LIMIT {LOAD_BATCH_SIZE}
             OFFSET {offset};
         """
-        # ttl=600 caches the result for 10 minutes, reducing repeated load time
         df = db_conn.query(sql_query, ttl=600)
         
-        # Convert DataFrame rows to List of Dicts (JSON structure)
         return df.to_dict('records')
     except Exception as e:
         print(f"🔴 DB Batch Load Failed: {e}")
@@ -234,7 +224,6 @@ def go_to_prev_page():
 def save_word_to_db(word_data: Dict) -> bool:
     """Adds a single word document to the database using SQL."""
     try:
-        # Prepare columns and values for insertion
         columns = ', '.join(word_data.keys())
         values_placeholders = ', '.join([f':{key}' for key in word_data.keys()])
         
@@ -242,7 +231,6 @@ def save_word_to_db(word_data: Dict) -> bool:
             INSERT INTO {TABLE_NAME} ({columns})
             VALUES ({values_placeholders});
         """
-        # Use st.connection session for transaction/write operation
         with db_conn.session as s:
             s.execute(sql_insert, params=word_data)
             s.commit()
@@ -255,10 +243,7 @@ def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
     """Updates specific fields of a word document using SQL."""
     try:
         with db_conn.session as s:
-            # Prepare SET clause for update
             set_clauses = [f"{key} = :{key}" for key in fields_to_update.keys()]
-            
-            # Combine parameters for execution (need to use 'word' for WHERE clause)
             params = {**fields_to_update, 'word_name': word_data['word']}
             
             sql_update = f"""
@@ -358,11 +343,13 @@ class LongRunningTaskController:
 
     # --- THREAD TARGET FUNCTIONS ---
     def _extract_and_save_batch(self, num_words: int, existing_words: List[str], auto_fetch: bool):
+        """Generates structured word data, enriches it with audio/briefing, and saves to DB."""
         try:
             st.session_state.autotask_message = f"LLM Task: Generating {num_words} structured words..."
             prompt = f"Generate {num_words} unique, extremely high-level SAT vocabulary words. The words must NOT be any of the following: {', '.join(existing_words) if existing_words else 'none'}."
             list_schema = {"type": "array", "items": SatWord.model_json_schema()}
             config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
+            
             response = gemini_client.models.generate_content(
                 model="gemini-2.5-flash", contents=prompt, config=config
             )
@@ -371,6 +358,7 @@ class LongRunningTaskController:
 
             successful_saves = 0
             
+            # --- Enrich data with audio and briefing (multi-threaded) ---
             with ThreadPoolExecutor(max_workers=5) as executor:
                 future_to_word = {executor.submit(self._enrich_word, word_data): word_data for word_data in validated_words}
                 enriched_words = [future.result() for future in future_to_word]
@@ -390,15 +378,19 @@ class LongRunningTaskController:
             st.session_state.autotask_running = False
             
     def _enrich_word(self, word_data: Dict) -> Dict:
+        """Helper to generate audio and briefing content for a single word."""
+        # 1. Pronunciation Audio
         pronunciation_audio = generate_tts_audio(word_data['word'])
         word_data['audio_base64'] = pronunciation_audio if pronunciation_audio else None
         
+        # 2. 2-Minute Briefing Content
         briefing_content = generate_full_briefing_content(word_data)
         if briefing_content:
             word_data.update(briefing_content)
         return word_data
         
     def _generate_briefing_batch(self, batch_indices: List[int], batch_size: int):
+        """Processes a batch of existing words to add missing briefing content."""
         try:
             generated_count = 0
             words_to_process = [st.session_state.vocab_data[i] for i in batch_indices]
@@ -410,7 +402,9 @@ class LongRunningTaskController:
                     result = future.result()
                     if result:
                         word_data = future_to_word[future]
+                        # Update only the briefing fields in the database
                         if update_word_in_db(word_data, result):
+                             # Update session state with new data
                              st.session_state.vocab_data[st.session_state.vocab_data.index(word_data)].update(result)
                              generated_count += 1
 
@@ -446,8 +440,10 @@ def handle_admin_extraction_button(num_words: int, auto_fetch: bool = False):
         st.warning("A background task is already running. Please wait.")
         return
 
+    # Pass existing words to LLM to avoid generating duplicates
     existing_words = [d['word'] for d in st.session_state.vocab_data if st.session_state.vocab_data]
     
+    # Run extraction and saving in a separate thread
     if task_controller.run_task_in_thread(
         task_controller._extract_and_save_batch, 
         num_words=num_words, 
@@ -463,18 +459,22 @@ def handle_manual_word_entry(word: str):
     st.info(f"Generating content for '{word}'...")
     
     try:
+        # LLM generation for structured data
         prompt = f"Generate the pronunciation, definition, mnemonic tip, and a usage sentence for the high-level SAT word: {word}. Return only the JSON object."
         list_schema = {"type": "array", "items": SatWord.model_json_schema()}
         config = types.GenerateContentConfig(response_mime_type="application/json", response_json_schema=list_schema)
         response = gemini_client.models.generate_content(model="gemini-2.5-flash", contents=prompt, config=config)
         data_list = json.loads(response.text)
         new_word_data = SatWord(**data_list[0]).model_dump()
+        
+        # Enrich with audio and briefing content
         new_word_data = task_controller._enrich_word(new_word_data)
         
     except Exception as e:
         st.error(f"🔴 Failed to generate content for '{word}'. Error: {e}"); return
 
     if save_word_to_db(new_word_data):
+        # Reset data load state to force reload with new word
         st.session_state.vocab_data = None 
         st.session_state.has_more_data = True
         st.session_state.total_word_count = 0
@@ -496,6 +496,7 @@ def auto_generate_briefings():
     if not words_to_brief_indices:
         return
 
+    # Process only a small batch automatically to prevent resource exhaustion
     batch_indices = words_to_brief_indices[:BRIEFING_BATCH_SIZE]
     
     if task_controller.run_task_in_thread(
@@ -668,7 +669,7 @@ def display_vocabulary_ui():
     st.header("📚 Vocabulary Display", divider="blue")
     
     if st.session_state.vocab_data is None or not st.session_state.vocab_data:
-        st.info("No vocabulary loaded yet. Please check the Data Tools tab to generate the first batch.")
+        st.info("No vocabulary loaded yet. Please use the **Data Tools** tab to generate the first batch of words.")
         return
 
     total_loaded_words = len(st.session_state.vocab_data)
@@ -755,7 +756,7 @@ def generate_quiz_ui():
     total_words = len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
     
     if total_words < QUIZ_SIZE:
-        st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}")
+        st.info(f"A minimum of {QUIZ_SIZE} words is required to start a quiz. Current total: {total_words}. Please generate more data.")
         return
 
     start_word_num = st.session_state.quiz_start_index + 1
@@ -971,7 +972,10 @@ def admin_extraction_ui():
     st.markdown("---")
     st.subheader("Vocabulary Extraction (Bulk - Background Task)")
     st.markdown(f"**Total Words in Database:** `{st.session_state.total_word_count}` (Target: {REQUIRED_WORD_COUNT}).")
+    
+    # CRITICAL: This is the button the admin should click to start filling the database
     if st.button(f"Force Extract {MANUAL_EXTRACT_BATCH} New Words (Background Task)", type="secondary", disabled=st.session_state.autotask_running): 
+        # MANUAL_EXTRACT_BATCH is 50, as requested
         handle_admin_extraction_button(MANUAL_EXTRACT_BATCH, auto_fetch=False); return
 
     st.markdown("---")
@@ -1020,11 +1024,14 @@ def main():
         st.info("Please log in or register using the sidebar to access the Vocabulary Builder.")
     else:
         # AUTOMATIC DATA FETCHING/FIXING LOGIC (Admin Only)
+        # 1. Checks if total word count is low (below 50) AND no task is running
         if st.session_state.is_admin and st.session_state.initial_load_done and not st.session_state.autotask_running:
             
+            # If database is nearly empty, automatically start bulk extraction of 25 words
             if st.session_state.total_word_count < AUTO_FETCH_THRESHOLD:
                  handle_admin_extraction_button(AUTO_FETCH_BATCH, auto_fetch=True)
             
+            # If database is populated, check for and generate missing briefings
             else:
                 auto_generate_briefings() 
 

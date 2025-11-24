@@ -12,18 +12,17 @@ from concurrent.futures import ThreadPoolExecutor
 
 import streamlit as st
 from pydantic import BaseModel, Field
+import pandas as pd # Required for reading SQL results
 
 # --- EXTERNAL API IMPORTS ---
 try:
-    # Supabase Client Import (Supabase is the database used)
-    from supabase import create_client, Client as SupabaseClient
-    # REMOVED: Specific imports like 'from gotrue.errors import AuthApiError' 
-    # and 'from postgrest.exceptions import APIError' to fix ModuleNotFoundError.
-    # We will rely on the base 'Exception' handler instead.
+    # We use st.connection for the database, but need standard imports for AI/TTS
+    # The 'psycopg2-binary' driver is handled by st.connection type='sql' but must be in requirements.txt
+    pass
 except ImportError:
-    st.error("SUPABASE ERROR: The required library 'supabase' is likely missing. Please install it.")
-    st.stop()
-# ... (rest of imports remain the same) ...
+    # The app won't reach here if st.connection works, but good practice.
+    pass
+
 try:
     from gtts import gTTS
 except ImportError:
@@ -73,46 +72,40 @@ class SatWord(BaseModel):
     briefing_audio_base64: Optional[str] = Field(default=None, description="Base64 encoded audio data for the briefing.")
 
 # ======================================================================
-# 2. SETUP & INITIALIZATION (Database and AI Clients)
+# 2. SETUP & INITIALIZATION (Neon/PostgreSQL Client)
 # ======================================================================
 
 @st.cache_resource
-def initialize_db_client() -> Optional[SupabaseClient]:
-    """Initializes the database client (Supabase) using Streamlit secrets."""
+def initialize_db_connection():
+    """Initializes and returns the Streamlit SQL connection object."""
     try:
-        url = st.secrets["database_client"]["SUPABASE_URL"]
-        key = st.secrets["database_client"]["SUPABASE_KEY"]
-        
-        client: SupabaseClient = create_client(url, key)
+        # Uses the URL from [connections.neon_db] in secrets.toml
+        conn = st.connection("neon_db", type="sql")
         
         # Test connectivity and table existence
-        try:
-            client.from_(TABLE_NAME).select("word").limit(1).execute() 
-        except Exception as e: # Catch all errors, including PostgrestAPIError
-            if "not find the table" in str(e):
-                st.error(f"🔴 DATABASE TABLE MISSING: Could not find table '{TABLE_NAME}'.")
-                st.warning("ACTION: Please create the table in your Supabase dashboard or check the `TABLE_NAME` variable in the Python code.")
-                return None
-            else:
-                 raise e 
+        conn.query(f"SELECT 'success' FROM {TABLE_NAME} LIMIT 1;", ttl=0)
         
-        st.success("✅ Database client (Supabase) initialized and connected.")
-        return client
-        
-    except KeyError as e:
-        st.error(f"🔴 CONFIGURATION ERROR: Missing secret key {e} under [database_client]. Please update secrets.toml.")
-        st.stop()
+        st.success("✅ Database connection (Neon/PostgreSQL) initialized and table found.")
+        return conn
+    
     except Exception as e:
-        st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}.")
-        st.stop()
+        # Check for the common error related to the missing table
+        if "relation" in str(e) and "does not exist" in str(e):
+            st.error(f"🔴 DATABASE TABLE MISSING: Table '{TABLE_NAME}' does not exist in Neon.")
+            st.warning("ACTION: Please create the table in your Neon dashboard.")
+            st.stop()
+        else:
+            st.error(f"🔴 DATABASE CONNECTION FAILED. Root Cause: {e}.")
+            st.stop()
 
-# --- Global Database Client Initialization ---
+# Global database connection object
 try:
-    db_client = initialize_db_client()
-except Exception:
+    db_conn = initialize_db_connection()
+except SystemExit:
+    db_conn = None 
     st.stop()
 
-# --- GEMINI CLIENT INITIALIZATION (UNCHANGED) ---
+# --- GEMINI CLIENT INITIALIZATION ---
 if "GEMINI_API_KEY" not in st.secrets:
     st.error("🔴 GEMINI_API_KEY is missing! Please set it in your Streamlit Secrets.")
     st.stop()
@@ -123,17 +116,14 @@ except Exception as e:
     st.error(f"🔴 Failed to initialize Gemini Client: {e}")
     st.stop()
 
-# CRITICAL CHECK: If db_client is None due to table error, stop script execution
-if db_client is None:
-    st.stop()
-
 
 # ======================================================================
-# 3. CORE UTILITIES & LAZY LOADING
+# 3. CORE UTILITIES & LAZY LOADING (SQL Implementation)
 # ======================================================================
 
 def initialize_session_state():
     """Sets up default session state variables."""
+    # ... (State initialization - unchanged) ...
     if 'current_user_email' not in st.session_state: st.session_state.current_user_email = None
     if 'is_auth' not in st.session_state: st.session_state.is_auth = False
     if 'vocab_data' not in st.session_state: st.session_state.vocab_data = None 
@@ -156,28 +146,28 @@ def initialize_session_state():
 
 
 def get_total_word_count() -> int:
-    """Fetches the total document count using the database client (Supabase)."""
+    """Fetches the total document count using SQL."""
     try:
-        response = db_client.from_(TABLE_NAME).select("count", count="exact").limit(0).execute()
-        return response.count if response and response.count is not None else 0
-    except Exception as e:
-        print(f"🔴 DB Count Failed: {e}")
-        return len(st.session_state.vocab_data) if st.session_state.vocab_data else 0
+        # Uses st.connection's caching feature (ttl=0 forces a fresh read)
+        result = db_conn.query(f"SELECT COUNT(*) FROM {TABLE_NAME};", ttl=0)
+        return int(result.iloc[0, 0])
+    except Exception:
+        return 0
 
 def fetch_vocabulary_batch(offset: int) -> List[Dict]:
-    """Fetches the next batch of words using offset-based pagination."""
-    start_index = offset
-    end_index = offset + LOAD_BATCH_SIZE - 1
-    
+    """Fetches the next batch of words using offset-based SQL pagination."""
     try:
-        response = (
-            db_client.from_(TABLE_NAME)
-            .select("*")
-            .order('created_at', desc=False)
-            .range(start_index, end_index)
-            .execute()
-        )
-        return response.data
+        sql_query = f"""
+            SELECT * FROM {TABLE_NAME}
+            ORDER BY created_at ASC
+            LIMIT {LOAD_BATCH_SIZE}
+            OFFSET {offset};
+        """
+        # ttl=600 caches the result for 10 minutes, reducing repeated load time
+        df = db_conn.query(sql_query, ttl=600)
+        
+        # Convert DataFrame rows to List of Dicts (JSON structure)
+        return df.to_dict('records')
     except Exception as e:
         print(f"🔴 DB Batch Load Failed: {e}")
         return []
@@ -239,21 +229,45 @@ def go_to_prev_page():
     st.session_state.current_page_index -= 1
     st.rerun()
 
-# --- Database Write Operations ---
+# --- Database Write Operations (SQL Implementation) ---
 
 def save_word_to_db(word_data: Dict) -> bool:
-    """Adds a single word document to the database."""
+    """Adds a single word document to the database using SQL."""
     try:
-        db_client.from_(TABLE_NAME).insert(word_data).execute()
+        # Prepare columns and values for insertion
+        columns = ', '.join(word_data.keys())
+        values_placeholders = ', '.join([f':{key}' for key in word_data.keys()])
+        
+        sql_insert = f"""
+            INSERT INTO {TABLE_NAME} ({columns})
+            VALUES ({values_placeholders});
+        """
+        # Use st.connection session for transaction/write operation
+        with db_conn.session as s:
+            s.execute(sql_insert, params=word_data)
+            s.commit()
         return True
     except Exception as e:
         print(f"🔴 DB Save Failed for {word_data['word']}: {e}")
         return False
         
 def update_word_in_db(word_data: Dict, fields_to_update: Dict) -> bool:
-    """Updates specific fields of a word document in the database by word name."""
+    """Updates specific fields of a word document using SQL."""
     try:
-        db_client.from_(TABLE_NAME).update(fields_to_update).eq('word', word_data['word']).execute()
+        with db_conn.session as s:
+            # Prepare SET clause for update
+            set_clauses = [f"{key} = :{key}" for key in fields_to_update.keys()]
+            
+            # Combine parameters for execution (need to use 'word' for WHERE clause)
+            params = {**fields_to_update, 'word_name': word_data['word']}
+            
+            sql_update = f"""
+                UPDATE {TABLE_NAME}
+                SET {', '.join(set_clauses)}
+                WHERE word = :word_name;
+            """
+            s.execute(sql_update, params=params)
+            s.commit()
         return True
     except Exception as e:
         print(f"🔴 DB Update Failed for {word_data['word']}: {e}")
@@ -612,7 +626,7 @@ def handle_logout():
     st.rerun()
 
 # ======================================================================
-# 6. UI COMPONENTS
+# 6. UI COMPONENTS (UNCHANGED)
 # ======================================================================
 
 def data_board_ui():
